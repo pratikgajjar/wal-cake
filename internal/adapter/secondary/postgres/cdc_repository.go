@@ -48,7 +48,8 @@ type relationData struct {
 	columns    []pglogrepl.RelationMessageColumn
 }
 
-// NewCDCRepository creates a new CDCRepository
+// NewCDCRepository creates a new CDCRepository that implements the WALRepository interface
+// using direct PostgreSQL logical replication protocol instead of relying on the wal-e package
 func NewCDCRepository(cfg *config.PostgresConfig, log *logger.Logger) repository.WALRepository {
 	ctx, cancel := context.WithCancel(context.Background())
 	
@@ -73,9 +74,8 @@ func (r *CDCRepository) StartReplication(ctx context.Context, slot string, start
 	r.slotName = slot
 	r.publicationName = r.config.Publications
 
-	// Create connection string
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
-		r.config.User, r.config.Password, r.config.Host, r.config.Port, r.config.Database)
+	// Get connection string from config
+	connStr := r.config.ConnectionURL
 
 	// Connect to PostgreSQL
 	var err error

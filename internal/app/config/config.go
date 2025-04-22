@@ -33,20 +33,9 @@ type Config struct {
 
 // PostgresConfig holds PostgreSQL-specific configuration
 type PostgresConfig struct {
-	// Host is the PostgreSQL host
-	Host string
-	
-	// Port is the PostgreSQL port
-	Port int
-	
-	// Database is the PostgreSQL database name
-	Database string
-	
-	// User is the PostgreSQL user
-	User string
-	
-	// Password is the PostgreSQL password
-	Password string
+	// ConnectionURL is the PostgreSQL connection URL
+	// Format: postgres://username:password@host:port/database
+	ConnectionURL string
 	
 	// ReplicationSlot is the name of the replication slot to use
 	ReplicationSlot string
@@ -143,11 +132,7 @@ func LoadConfig() (*Config, error) {
 	
 	config := &Config{
 		Postgres: PostgresConfig{
-			Host:              getEnv("POSTGRES_HOST", "localhost"),
-			Port:              getEnvAsInt("POSTGRES_PORT", 5432),
-			Database:          getEnv("POSTGRES_DB", ""),
-			User:              getEnv("POSTGRES_USER", ""),
-			Password:          getEnv("POSTGRES_PASSWORD", ""),
+			ConnectionURL:      getEnv("POSTGRES_URL", ""),
 			ReplicationSlot:   getEnv("POSTGRES_REPLICATION_SLOT", "wal_cake_slot"),
 			Publications:      getEnv("POSTGRES_PUBLICATIONS", "wal_cake_pub"),
 			MaxConnections:    getEnvAsInt("POSTGRES_MAX_CONNECTIONS", 5),
@@ -195,22 +180,27 @@ func LoadConfig() (*Config, error) {
 
 // validate checks if the configuration is valid
 func (c *Config) validate() error {
-	// Check required PostgreSQL configuration
-	if c.Postgres.Database == "" {
-		return fmt.Errorf("POSTGRES_DB is required")
+	// Validate PostgreSQL configuration
+	if c.Postgres.ConnectionURL == "" {
+		return fmt.Errorf("POSTGRES_URL is required")
 	}
-	if c.Postgres.User == "" {
-		return fmt.Errorf("POSTGRES_USER is required")
+
+	// If using a local endpoint (e.g., for development), AWS credentials are optional
+	if c.AWS.Endpoint == "" {
+		// For production, AWS credentials are required
+		if c.AWS.SecretAccessKey == "" {
+			return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required")
+		}
+		if c.AWS.AccessKeyID == "" {
+			return fmt.Errorf("AWS_ACCESS_KEY_ID is required")
+		}
 	}
-	
-	// Check required AWS configuration
-	if c.AWS.AccessKeyID == "" {
-		return fmt.Errorf("AWS_ACCESS_KEY_ID is required")
+
+	// Region is always required
+	if c.AWS.Region == "" {
+		return fmt.Errorf("AWS_REGION is required")
 	}
-	if c.AWS.SecretAccessKey == "" {
-		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required")
-	}
-	
+
 	// Check required S3 Tables configuration
 	if c.S3Tables.BucketName == "" {
 		return fmt.Errorf("S3_BUCKET_NAME is required")

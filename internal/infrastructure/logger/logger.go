@@ -2,6 +2,8 @@
 package logger
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -30,22 +32,31 @@ func NewWithOutput(serviceName string, w io.Writer) *Logger {
 		TimeFormat: time.RFC3339,
 		NoColor:    true,
 		FormatLevel: func(i interface{}) string {
-			return "level=" + i.(string)
+			return "level=" + fmt.Sprintf("%v", i)
 		},
 		FormatTimestamp: func(i interface{}) string {
 			return "time=" + i.(string)
 		},
 		FormatMessage: func(i interface{}) string {
-			if i == nil || i == "" {
+			if i == nil {
 				return ""
 			}
-			return "msg=" + i.(string)
+			return "msg=" + fmt.Sprintf("%v", i)
 		},
 		FormatFieldName: func(i interface{}) string {
-			return i.(string) + "="
+			return fmt.Sprintf("%v", i) + "="
 		},
 		FormatFieldValue: func(i interface{}) string {
-			return i.(string)
+			switch v := i.(type) {
+			case string:
+				return v
+			case json.Number:
+				return v.String()
+			case nil:
+				return "null"
+			default:
+				return fmt.Sprintf("%v", v)
+			}
 		},
 	}
 
