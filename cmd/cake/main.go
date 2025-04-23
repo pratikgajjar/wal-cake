@@ -96,7 +96,6 @@ func main() {
 					defer wg.Done()
 					processBatch(ctx, cfg, batch, transformer, uploader, ackCh)
 				}()
-
 				// Reset buffer and maxLSN
 				buffer = make([]*model.CDCEvent, 0, cfg.BatchSize)
 			}
