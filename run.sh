@@ -7,4 +7,4 @@ export AWS_ACCESS_KEY_ID="access_key"
 export AWS_SECRET_ACCESS_KEY="secret_key"
 export AWS_ENDPOINT="http://localhost:9000"
 
-exec go run cmd/pgcdc2s3/main.go
+exec go run cmd/cake/main.go

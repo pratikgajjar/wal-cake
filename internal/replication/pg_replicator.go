@@ -168,6 +168,8 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 
 	relations := make(map[uint32]relationInfo)
 
+	standbyMessageTimeout := time.Second * 5
+	nextStandbyMessageDeadline := time.Now().Add(standbyMessageTimeout)
 	for {
 		select {
 		case <-ctx.Done():
@@ -180,6 +182,10 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 		case <-ticker.C:
 			r.SendStandyStatusUpdate(ctx)
 		default:
+			if time.Now().After(nextStandbyMessageDeadline) {
+				r.SendStandyStatusUpdate(ctx)
+				nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout)
+			}
 			msg, err := r.repConn.ReceiveMessage(ctx)
 			if err != nil {
 				return fmt.Errorf("receive message error: %w", err)
@@ -208,17 +214,10 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 					continue
 				}
 				log.Debug().Uint64("server_wal_end", uint64(pkm.ServerWALEnd)).Msg("primary keepalive message")
-
 				// If the server requests a reply, send one immediately
 				if pkm.ReplyRequested {
-					// When the server requests a reply, we still only acknowledge up to the last confirmed LSN
-					status := pglogrepl.StandbyStatusUpdate{
-						WALWritePosition: r.lastAckedLSN,
-					}
-					err := pglogrepl.SendStandbyStatusUpdate(ctx, r.repConn, status)
-					if err != nil {
-						log.Error().Err(err).Msg("failed to send requested status update")
-					}
+					r.SendStandyStatusUpdate(ctx)
+					nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout)
 				}
 			case pglogrepl.XLogDataByteID:
 				// Handle XLogData message (actual data)
@@ -230,7 +229,7 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 
 				// Calculate the new WAL position
 				newLSN := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-
+				nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout)
 				// Update our current WAL position, but don't acknowledge it yet
 				// We'll only acknowledge after successful S3 upload
 				r.currentLSN = newLSN
