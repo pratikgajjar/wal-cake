@@ -111,8 +111,9 @@ func processBatch(ctx context.Context, cfg *config.Config, batch *CDCBatch, pw t
 	}
 
 	// Generate a unique key for this batch
-	timestamp := time.Now().UnixNano()
-	key := fmt.Sprintf("%s/%s_%d.parquet", cfg.Slot, cfg.Slot, timestamp)
+	timestamp := time.Now().UnixMicro()
+	date := time.Now().Format("2006/01/02")
+	key := fmt.Sprintf("%s/%s/%d.parquet", cfg.Namespace, date, timestamp)
 
 	log.Info().Int("events", len(batch.Events)).Uint64("maxLSN", batch.LastLSN()).Msg("Processing batch")
 

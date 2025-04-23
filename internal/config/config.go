@@ -11,6 +11,7 @@ import (
 type Config struct {
 	PGConn        string
 	Slot          string
+	Namespace     string
 	Publication   string
 	OutputPlugin  string
 	S3Bucket      string
@@ -25,6 +26,7 @@ func LoadConfig() *Config {
 	var flush string
 	flag.StringVar(&cfg.PGConn, "pg-conn", os.Getenv("PG_CONN_STRING"), "Postgres connection string")
 	flag.StringVar(&cfg.Slot, "slot", os.Getenv("PG_SLOT"), "Replication slot name")
+	flag.StringVar(&cfg.Namespace, "namespace", os.Getenv("NAMESPACE"), "Namespace for s3 bucket")
 	flag.StringVar(&cfg.Publication, "publication", os.Getenv("PG_PUBLICATION"), "Publication name (default: alltables)")
 	flag.StringVar(&cfg.OutputPlugin, "plugin", os.Getenv("PG_OUTPUT_PLUGIN"), "Logical decoding output plugin (default: pgoutput)")
 	flag.StringVar(&cfg.S3Bucket, "s3-bucket", os.Getenv("S3_BUCKET_NAME"), "S3 bucket for data lake")
@@ -39,6 +41,9 @@ func LoadConfig() *Config {
 	}
 	if cfg.Slot == "" {
 		log.Fatal().Msg("slot is required")
+	}
+	if cfg.Namespace == "" {
+		cfg.Namespace = "default"
 	}
 	if cfg.Publication == "" {
 		cfg.Publication = "alltables"

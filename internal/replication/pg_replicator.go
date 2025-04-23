@@ -17,8 +17,6 @@ import (
 	"git.famapp.in/fampay-inc/wal-cake/internal/model"
 )
 
-const statusInterval = 10 * time.Second
-
 // PGReplicator interface defines methods for PostgreSQL logical replication
 type PGReplicator interface {
 	// Start begins replication and sends CDC events to the provided channel
@@ -175,35 +173,28 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 		return fmt.Errorf("failed to start replication: %w", err)
 	}
 
-	ticker := time.NewTicker(statusInterval)
-	defer ticker.Stop()
-
 	// Set up a ticker for sending standby status updates
 	const receiveTimeout = 5 * time.Second
 	standbyMessageTicker := time.NewTicker(receiveTimeout)
 	defer standbyMessageTicker.Stop()
 
-	// Set up a non-blocking approach for message receiving
-
 	for {
 		select {
 		case <-ctx.Done():
 			// Send a final status update before shutting down
-			_ = r.SendStandbyStatusUpdate(ctx, false)
 			return nil
 		case lsn := <-ackCh:
 			// Update the last acknowledged LSN
 			newLSN := pglogrepl.LSN(lsn)
-			if newLSN > r.lastAckedLSN {
-				r.lastAckedLSN = newLSN
-				log.Info().Uint64("lsn", lsn).Msg("Updated acknowledged LSN position")
-				// Send a status update immediately after receiving an acknowledgment
-				_ = r.SendStandbyStatusUpdate(ctx, false)
-			}
+			// if newLSN > r.lastAckedLSN {
+			r.lastAckedLSN = newLSN
+			log.Info().Uint64("lsn", lsn).Str("lsnS", newLSN.String()).Msg("Updated acknowledged LSN position")
+			// Send a status update immediately after receiving an acknowledgment
+			_ = r.SendStandbyStatusUpdate(ctx, false)
+			// }
 		case <-standbyMessageTicker.C:
 			// Send periodic status updates
-			_ = r.SendStandbyStatusUpdate(ctx, false)
-
+			_ = r.SendStandbyStatusUpdate(ctx, true)
 		default:
 			// Set up a timeout context for receiving messages
 			receiveCtx, cancel := context.WithTimeout(ctx, receiveTimeout)
@@ -242,7 +233,7 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 					log.Error().Err(err).Msg("failed to parse primary keepalive message")
 					continue
 				}
-				log.Debug().Uint64("server_wal_end", uint64(pkm.ServerWALEnd)).Msg("primary keepalive message")
+				// log.Debug().Str("server_wal_end", pkm.ServerWALEnd.String()).Msg("primary keepalive message")
 				// If the server requests a reply, send one immediately
 				if pkm.ReplyRequested {
 					_ = r.SendStandbyStatusUpdate(ctx, true)
@@ -257,6 +248,7 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 
 				// Calculate the new WAL position
 				xLogPos := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+				log.Debug().Str("xLogPos", xLogPos.String()).Msg("updated wal")
 				logicalMsg, err := pglogrepl.Parse(xld.WALData)
 				if err != nil {
 					log.Error().Err(err).Msg("failed to parse logical replication message")
@@ -301,7 +293,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Data:      data,
 		}
 
-		log.Info().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Msg("insert event")
+		log.Info().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Str("lsn", xLogPos.String()).Msg("insert event")
 		ch <- ev
 
 	case *pglogrepl.UpdateMessage:

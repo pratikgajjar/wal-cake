@@ -6,5 +6,6 @@ export AWS_REGION="ap-south-1"
 export AWS_ACCESS_KEY_ID="access_key"
 export AWS_SECRET_ACCESS_KEY="secret_key"
 export AWS_ENDPOINT="http://localhost:9000"
+export NAMESPACE="walcake"
 
 exec go run cmd/cake/main.go
