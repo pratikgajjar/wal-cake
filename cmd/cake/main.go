@@ -43,7 +43,13 @@ func main() {
 	defer close(ackCh)
 
 	repl := replication.NewPGReplicator(cfg)
-	transformer := transform.NewParquetWriter(cfg)
+	transformer := transform.NewParquetWriter()
+	
+	// Add filter to exclude commit events from Parquet files
+	transformer.AddFilter(func(event *model.CDCEvent) bool {
+		return event.Operation != model.CommitOp
+	})
+	
 	uploader := storage.NewS3Uploader(cfg)
 
 	// Start the replicator with LSN acknowledgment

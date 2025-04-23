@@ -14,19 +14,24 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/rs/zerolog/log"
 
-	"git.famapp.in/fampay-inc/wal-cake/internal/config"
 	"git.famapp.in/fampay-inc/wal-cake/internal/model"
 )
 
-// ParquetWriter writes CDC events to Parquet format
+// EventFilter defines a function type for filtering CDC events
+type EventFilter func(event *model.CDCEvent) bool
+
+// ParquetWriter interface defines methods for writing CDC events to Parquet format
 type ParquetWriter interface {
 	// WriteToBuffer writes events to an in-memory buffer and returns the bytes
 	WriteToBuffer(events []*model.CDCEvent) ([]byte, error)
 	GetCompressionCodec() string
+	// AddFilter adds an event filter to the writer
+	AddFilter(filter EventFilter)
 }
 
 type parquetWriter struct {
 	compression compress.Compression
+	filters     []EventFilter
 }
 
 // writerTell is a wrapper that implements io.Writer and has a Tell method
@@ -45,16 +50,21 @@ func (w *writerTell) Tell() int64 {
 	return w.pos
 }
 
-// NewParquetWriter creates a ParquetWriter with ZSTD compression.
-func NewParquetWriter(cfg *config.Config) ParquetWriter {
-	_ = cfg // not used currently
+// NewParquetWriter creates a new Parquet writer with ZSTD compression
+func NewParquetWriter() ParquetWriter {
 	return &parquetWriter{
 		compression: compress.Codecs.Zstd,
+		filters:     make([]EventFilter, 0),
 	}
 }
 
 func (w *parquetWriter) GetCompressionCodec() string {
 	return strings.ToLower(w.compression.String())
+}
+
+// AddFilter adds an event filter to the writer
+func (w *parquetWriter) AddFilter(filter EventFilter) {
+	w.filters = append(w.filters, filter)
 }
 
 // createSchema creates the Parquet schema for CDC events
@@ -95,8 +105,27 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 	return schema.NewSchema(root)
 }
 
-// writeEventsToParquet writes events to a parquet file or buffer
+// writeEventsToParquet writes the given events to a Parquet file, applying filters
 func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io.Writer) error {
+	// First count how many events will pass the filter
+	validCount := 0
+	for _, ev := range events {
+		if w.shouldIncludeEvent(ev) {
+			validCount++
+		}
+	}
+
+	// Log filter statistics
+	if validCount < len(events) {
+		log.Info().Int("total_events", len(events)).Int("filtered_events", len(events)-validCount).Int("written_events", validCount).Msg("filtered events before parquet writing")
+	}
+
+	// If no events after filtering, return early
+	if validCount == 0 {
+		log.Warn().Msg("no events to write after filtering")
+		return nil
+	}
+
 	// Create a writer that can tell its position
 	wt := &writerTell{w: writer}
 
@@ -108,98 +137,127 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 		parquet.WithCompression(w.compression),
 		parquet.WithDictionaryDefault(true),
 		parquet.WithStats(true),
-		parquet.WithMaxRowGroupLength(parquet.DefaultMaxRowGroupLen),
 		parquet.WithCreatedBy("wal-cake CDC to S3"),
 	)
 
-	// Create writer
-	pw := file.NewParquetWriter(wt, schema.Root(), file.WithWriterProps(props))
-	defer pw.Close()
+	// Create parquet file writer
+	fileWriter := file.NewParquetWriter(wt, schema.Root(), file.WithWriterProps(props))
 
-	// Create row group
-	rg := pw.AppendRowGroup()
+	// Create row group with a reasonable size
+	rg := fileWriter.AppendRowGroup()
+
+	// Prepare column data arrays once with the exact size needed
+	tableData := make([]parquet.ByteArray, validCount)
+	opData := make([]parquet.ByteArray, validCount)
+	tsData := make([]int64, validCount)
+	lsnData := make([]int64, validCount)
+	dataJsonValues := make([]parquet.ByteArray, validCount)
+
+	// Fill column data arrays in a single pass
+	index := 0
+	for _, ev := range events {
+		if !w.shouldIncludeEvent(ev) {
+			continue
+		}
+		
+		// Table column
+		tableData[index] = []byte(ev.Table)
+		
+		// Operation column
+		opData[index] = []byte(ev.Operation)
+		
+		// Timestamp column
+		tsData[index] = ev.Timestamp.UnixNano() / int64(time.Millisecond)
+		
+		// LSN column
+		lsnData[index] = int64(ev.LSN)
+		
+		// Data JSON column
+		jsonData, err := json.Marshal(ev.Data)
+		if err != nil {
+			return fmt.Errorf("marshal data to JSON: %w", err)
+		}
+		dataJsonValues[index] = jsonData
+		
+		index++
+	}
 
 	// Write table column
 	tableWriter, err := rg.NextColumn()
 	if err != nil {
-		return fmt.Errorf("create table column writer: %w", err)
+		return fmt.Errorf("next column: %w", err)
 	}
 	byteArrayWriter := tableWriter.(*file.ByteArrayColumnChunkWriter)
-
-	for _, ev := range events {
-		_, err := byteArrayWriter.WriteBatch([]parquet.ByteArray{[]byte(ev.Table)}, nil, nil)
-		if err != nil {
-			return fmt.Errorf("write table column: %w", err)
-		}
+	_, err = byteArrayWriter.WriteBatch(tableData, nil, nil)
+	if err != nil {
+		return fmt.Errorf("write table column: %w", err)
 	}
 
 	// Write operation column
 	opWriter, err := rg.NextColumn()
 	if err != nil {
-		return fmt.Errorf("create operation column writer: %w", err)
+		return fmt.Errorf("next column: %w", err)
 	}
 	opByteArrayWriter := opWriter.(*file.ByteArrayColumnChunkWriter)
-
-	for _, ev := range events {
-		_, err := opByteArrayWriter.WriteBatch([]parquet.ByteArray{[]byte(ev.Operation)}, nil, nil)
-		if err != nil {
-			return fmt.Errorf("write operation column: %w", err)
-		}
+	_, err = opByteArrayWriter.WriteBatch(opData, nil, nil)
+	if err != nil {
+		return fmt.Errorf("write operation column: %w", err)
 	}
 
 	// Write timestamp column
 	tsWriter, err := rg.NextColumn()
 	if err != nil {
-		return fmt.Errorf("create timestamp column writer: %w", err)
+		return fmt.Errorf("next column: %w", err)
 	}
 	tsInt64Writer := tsWriter.(*file.Int64ColumnChunkWriter)
-
-	for _, ev := range events {
-		ts := ev.Timestamp.UnixNano() / int64(time.Millisecond)
-		_, err := tsInt64Writer.WriteBatch([]int64{ts}, nil, nil)
-		if err != nil {
-			return fmt.Errorf("write timestamp column: %w", err)
-		}
+	_, err = tsInt64Writer.WriteBatch(tsData, nil, nil)
+	if err != nil {
+		return fmt.Errorf("write timestamp column: %w", err)
 	}
 
 	// Write LSN column
 	lsnWriter, err := rg.NextColumn()
 	if err != nil {
-		return fmt.Errorf("create lsn column writer: %w", err)
+		return fmt.Errorf("next column: %w", err)
 	}
 	lsnInt64Writer := lsnWriter.(*file.Int64ColumnChunkWriter)
-
-	for _, ev := range events {
-		_, err := lsnInt64Writer.WriteBatch([]int64{int64(ev.LSN)}, nil, nil)
-		if err != nil {
-			return fmt.Errorf("write lsn column: %w", err)
-		}
+	_, err = lsnInt64Writer.WriteBatch(lsnData, nil, nil)
+	if err != nil {
+		return fmt.Errorf("write lsn column: %w", err)
 	}
 
 	// Write data JSON column
 	dataWriter, err := rg.NextColumn()
 	if err != nil {
-		return fmt.Errorf("create data_json column writer: %w", err)
+		return fmt.Errorf("next column: %w", err)
 	}
 	dataByteArrayWriter := dataWriter.(*file.ByteArrayColumnChunkWriter)
-
-	for _, ev := range events {
-		jsonData, err := json.Marshal(ev.Data)
-		if err != nil {
-			return fmt.Errorf("marshal data to JSON: %w", err)
-		}
-		_, err = dataByteArrayWriter.WriteBatch([]parquet.ByteArray{jsonData}, nil, nil)
-		if err != nil {
-			return fmt.Errorf("write data_json column: %w", err)
-		}
+	_, err = dataByteArrayWriter.WriteBatch(dataJsonValues, nil, nil)
+	if err != nil {
+		return fmt.Errorf("write data column: %w", err)
 	}
 
-	// Close row group
+	// Close the row group
 	if err := rg.Close(); err != nil {
 		return fmt.Errorf("close row group: %w", err)
 	}
 
+	// Close the file writer
+	if err := fileWriter.Close(); err != nil {
+		return fmt.Errorf("close file writer: %w", err)
+	}
+
 	return nil
+}
+
+// shouldIncludeEvent applies all filters to determine if an event should be included
+func (w *parquetWriter) shouldIncludeEvent(event *model.CDCEvent) bool {
+	for _, filter := range w.filters {
+		if !filter(event) {
+			return false
+		}
+	}
+	return true
 }
 
 // WriteToBuffer writes the given events to an in-memory buffer and returns the bytes.
@@ -209,7 +267,7 @@ func (w *parquetWriter) WriteToBuffer(events []*model.CDCEvent) ([]byte, error) 
 	// Create an in-memory buffer
 	buf := new(bytes.Buffer)
 
-	// Write events to the buffer
+	// Write events to the buffer (filtering happens during writing)
 	if err := w.writeEventsToParquet(events, buf); err != nil {
 		return nil, err
 	}
