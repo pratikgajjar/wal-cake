@@ -1,6 +1,8 @@
-Follow SOLID principles and idiomatic golang, hexagonal architecture.
+Follow SOLID principles and idiomatic golang.
+Service must be blazingly fast and efficient
 This is a production codebase, so always write production-grade code.
 Use zerolog with logfmt format for logging key=value
-Refer wal-e directory for implementation references 
-Use https://github.com/PeerDB-io/peerdb for postgres cdc reading references
-https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/service/s3tables for s3 table implementation
+For postgres cdc reading references
+1. Golang https://github.com/PeerDB-io/peerdb
+2. Java https://github.com/debezium/debezium
+Before using online search for go code references, try to use go doc
