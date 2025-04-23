@@ -353,7 +353,16 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 		log.Debug().Uint32("xid", msg.Xid).Msg("begin transaction")
 
 	case *pglogrepl.CommitMessage:
-		log.Debug().Msg("commit transaction")
+		ev := &model.CDCEvent{
+			Table:     "_transaction", // Special table name for transaction events
+			Operation: model.CommitOp,
+			Timestamp: time.Now(),
+			LSN:       uint64(xLogPos),
+			Data:      map[string]interface{}{"commit_lsn": xLogPos.String()},
+		}
+
+		log.Debug().Str("commit_lsn", xLogPos.String()).Msg("commit transaction")
+		ch <- ev
 
 	case *pglogrepl.TruncateMessage:
 		log.Debug().Msg("truncate message")
