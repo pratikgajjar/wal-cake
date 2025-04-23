@@ -73,8 +73,13 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 	ticker := time.NewTicker(statusInterval)
 	defer ticker.Stop()
 
-	// Map to store relation info
-	relations := make(map[uint32]string)
+	// Map to store relation info and column definitions
+	type relationInfo struct {
+		name    string
+		columns []*pglogrepl.RelationMessageColumn
+	}
+
+	relations := make(map[uint32]relationInfo)
 	
 	// We'll use a direct approach for message handling instead of channels
 	
@@ -173,74 +178,89 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 				// Handle different message types
 				switch msg := logicalMsg.(type) {
 				case *pglogrepl.RelationMessage:
-					// Store relation info for later use
-					relations[msg.RelationID] = msg.RelationName
-					log.Debug().Str("relation", msg.RelationName).Uint32("id", msg.RelationID).Msg("relation message")
+					// Store relation info and column definitions for later use
+					relations[msg.RelationID] = relationInfo{
+						name:    msg.RelationName,
+						columns: msg.Columns,
+					}
+					log.Debug().Str("relation", msg.RelationName).Uint32("id", msg.RelationID).Int("columns", len(msg.Columns)).Msg("relation message")
 					
 				case *pglogrepl.InsertMessage:
 					// Create CDC event for insert
-					tableName := relations[msg.RelationID]
-					if tableName == "" {
-						tableName = fmt.Sprintf("unknown-%d", msg.RelationID)
+					relInfo, ok := relations[msg.RelationID]
+					if !ok {
+						log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for insert")
+						relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
 					}
-					
+
+					// Create data map and extract values from tuple data
+					data := extractTupleData(msg.Tuple, relInfo.columns)
+
 					ev := &model.CDCEvent{
-						Table:     tableName,
+						Table:     relInfo.name,
 						Operation: model.InsertOp,
 						Timestamp: time.Now(),
 						LSN:       uint64(currentLSN),
-						Data:      map[string]interface{}{},
+						Data:      data,
 					}
-					
-					// TODO: Decode tuple data into the Data map
-					// This requires tracking column info from relation messages
-					
-					log.Info().Str("table", tableName).Str("op", string(model.InsertOp)).Msg("insert event")
+
+					log.Info().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Msg("insert event")
 					ch <- ev
 					
-					case *pglogrepl.UpdateMessage:
+				case *pglogrepl.UpdateMessage:
 					// Create CDC event for update
-					tableName := relations[msg.RelationID]
-					if tableName == "" {
-						tableName = fmt.Sprintf("unknown-%d", msg.RelationID)
+					relInfo, ok := relations[msg.RelationID]
+					if !ok {
+						log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for update")
+						relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
 					}
-					
+
+					// Extract the new data from the tuple
+					data := extractTupleData(msg.NewTuple, relInfo.columns)
+
+					// Also extract old data for reference if available
+					oldData := extractTupleData(msg.OldTuple, relInfo.columns)
+					if len(oldData) > 0 {
+						// Add old values to the data with a prefix
+						for k, v := range oldData {
+							data["old_"+k] = v
+						}
+					}
+
 					ev := &model.CDCEvent{
-						Table:     tableName,
+						Table:     relInfo.name,
 						Operation: model.UpdateOp,
 						Timestamp: time.Now(),
 						LSN:       uint64(currentLSN),
-						Data:      map[string]interface{}{},
+						Data:      data,
 					}
-					
-					// TODO: Decode tuple data into the Data map
-					// This requires tracking column info from relation messages
-					
-					log.Info().Str("table", tableName).Str("op", string(model.UpdateOp)).Msg("update event")
+
+					log.Info().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("data_fields", len(data)).Msg("update event")
 					ch <- ev
 					
-					case *pglogrepl.DeleteMessage:
+				case *pglogrepl.DeleteMessage:
 					// Create CDC event for delete
-					tableName := relations[msg.RelationID]
-					if tableName == "" {
-						tableName = fmt.Sprintf("unknown-%d", msg.RelationID)
+					relInfo, ok := relations[msg.RelationID]
+					if !ok {
+						log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for delete")
+						relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
 					}
-					
+
+					// For deletes, extract key data from the old tuple
+					data := extractTupleData(msg.OldTuple, relInfo.columns)
+
 					ev := &model.CDCEvent{
-						Table:     tableName,
+						Table:     relInfo.name,
 						Operation: model.DeleteOp,
 						Timestamp: time.Now(),
 						LSN:       uint64(currentLSN),
-						Data:      map[string]interface{}{},
+						Data:      data,
 					}
-					
-					// TODO: Decode tuple data into the Data map
-					// This requires tracking column info from relation messages
-					
-					log.Info().Str("table", tableName).Str("op", string(model.DeleteOp)).Msg("delete event")
+
+					log.Info().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("data_fields", len(data)).Msg("delete event")
 					ch <- ev
 					
-					case *pglogrepl.BeginMessage:
+				case *pglogrepl.BeginMessage:
 					log.Debug().Uint32("xid", msg.Xid).Msg("begin transaction")
 				
 				case *pglogrepl.CommitMessage:
