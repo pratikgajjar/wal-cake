@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -14,9 +15,10 @@ import (
 	"git.famapp.in/fampay-inc/wal-cake/internal/config"
 )
 
-// S3Uploader uploads files to S3
+// S3Uploader uploads data to S3
 type S3Uploader interface {
-	UploadFile(ctx context.Context, key, localPath string) error
+	// UploadBytes uploads data directly from memory to the specified S3 key
+	UploadBytes(ctx context.Context, key string, data []byte) error
 }
 
 type s3Uploader struct {
@@ -32,12 +34,12 @@ func NewS3Uploader(cfg *config.Config) S3Uploader {
 	return &s3Uploader{bucket: cfg.S3Bucket, region: cfg.Region, endpoint: endpoint}
 }
 
-// UploadFile uploads a local file to the specified S3 key
-func (u *s3Uploader) UploadFile(ctx context.Context, key, localPath string) error {
+// getS3Client returns a configured S3 client
+func (u *s3Uploader) getS3Client(ctx context.Context) (*s3.Client, error) {
 	// Load AWS config with region
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(u.region))
 	if err != nil {
-		return fmt.Errorf("load AWS config: %w", err)
+		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
 	
 	// Create S3 client with the latest recommended configuration approach
@@ -50,24 +52,28 @@ func (u *s3Uploader) UploadFile(ctx context.Context, key, localPath string) erro
 		}
 	}
 	
-	client := s3.NewFromConfig(awsCfg, s3Options)
+	return s3.NewFromConfig(awsCfg, s3Options), nil
+}
 
-	file, err := os.Open(localPath)
+
+
+// UploadBytes uploads data directly from memory to the specified S3 key
+func (u *s3Uploader) UploadBytes(ctx context.Context, key string, data []byte) error {
+	client, err := u.getS3Client(ctx)
 	if err != nil {
-		return fmt.Errorf("open file %s: %w", localPath, err)
+		return err
 	}
-	defer file.Close()
 
-	log.Info().Str("bucket", u.bucket).Str("key", key).Msg("Uploading file to S3")
+	log.Info().Str("bucket", u.bucket).Str("key", key).Int("size", len(data)).Msg("Uploading bytes directly to S3")
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(u.bucket),
 		Key:    aws.String(key),
-		Body:   file,
+		Body:   bytes.NewReader(data),
 		ACL:    types.ObjectCannedACLPrivate,
 	})
 	if err != nil {
-		return fmt.Errorf("upload to S3: %w", err)
+		return fmt.Errorf("upload bytes to S3: %w", err)
 	}
-	log.Info().Str("bucket", u.bucket).Str("key", key).Msg("Successfully uploaded to S3")
+	log.Info().Str("bucket", u.bucket).Str("key", key).Msg("Successfully uploaded bytes to S3")
 	return nil
 }

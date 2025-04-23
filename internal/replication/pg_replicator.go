@@ -17,16 +17,28 @@ import (
 
 const statusInterval = 10 * time.Second
 
-func NewPGReplicator(cfg *config.Config) *PGReplicator {
-	return &PGReplicator{cfg: cfg}
+// PGReplicator interface defines methods for PostgreSQL logical replication
+type PGReplicator interface {
+	// Start begins replication and sends CDC events to the provided channel
+	// It also listens for acknowledged LSNs on the ackCh to update the replication position
+	Start(ctx context.Context, eventsCh chan<- *model.CDCEvent, ackCh <-chan uint64) error
 }
 
-type PGReplicator struct {
+type pgReplicator struct {
 	cfg  *config.Config
 	conn *pgconn.PgConn
+	lastAckedLSN pglogrepl.LSN
 }
 
-func (r *PGReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent) error {
+// NewPGReplicator creates a new PostgreSQL replicator
+func NewPGReplicator(cfg *config.Config) PGReplicator {
+	return &pgReplicator{
+		cfg: cfg,
+		lastAckedLSN: pglogrepl.LSN(0),
+	}
+}
+
+func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ackCh <-chan uint64) error {
 	log.Info().Str("slot", r.cfg.Slot).Str("publication", r.cfg.Publication).Msg("starting PostgreSQL replication")
 	
 	var err error
@@ -63,20 +75,42 @@ func (r *PGReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent) err
 
 	// Map to store relation info
 	relations := make(map[uint32]string)
-
+	
+	// We'll use a direct approach for message handling instead of channels
+	
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		
+		case lsn := <-ackCh:
+			// Update the last acknowledged LSN
+			newLSN := pglogrepl.LSN(lsn)
+			if newLSN > r.lastAckedLSN {
+				r.lastAckedLSN = newLSN
+				log.Info().Uint64("lsn", lsn).Msg("Updated acknowledged LSN position")
+				
+				// Send a standby status update with the new LSN
+				status := pglogrepl.StandbyStatusUpdate{
+					WALWritePosition: r.lastAckedLSN,
+				}
+				err := pglogrepl.SendStandbyStatusUpdate(ctx, r.conn, status)
+				if err != nil {
+					log.Error().Err(err).Msg("failed to send standby status update after LSN acknowledgment")
+				}
+			}
+		
 		case <-ticker.C:
-			// send standby status
+			// Send periodic standby status update
+			// Only acknowledge up to the last confirmed LSN
 			status := pglogrepl.StandbyStatusUpdate{
-				WALWritePosition: startLSN,
+				WALWritePosition: r.lastAckedLSN,
 			}
 			err := pglogrepl.SendStandbyStatusUpdate(ctx, r.conn, status)
 			if err != nil {
 				log.Warn().Err(err).Msg("failed to send standby status update")
 			}
+		
 		default:
 			msg, err := r.conn.ReceiveMessage(ctx)
 			if err != nil {
@@ -109,7 +143,9 @@ func (r *PGReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent) err
 				
 				// If the server requests a reply, send one immediately
 				if pkm.ReplyRequested {
-					status := pglogrepl.StandbyStatusUpdate{WALWritePosition: pkm.ServerWALEnd}
+					// When the server requests a reply, we still only acknowledge up to the last confirmed LSN
+					// This ensures we don't acknowledge data that hasn't been safely stored in S3
+					status := pglogrepl.StandbyStatusUpdate{WALWritePosition: r.lastAckedLSN}
 					err := pglogrepl.SendStandbyStatusUpdate(ctx, r.conn, status)
 					if err != nil {
 						log.Error().Err(err).Msg("failed to send requested status update")
@@ -123,8 +159,9 @@ func (r *PGReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent) err
 					continue
 				}
 
-				// Update our position for the next status update
-				startLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+				// Update our current WAL position, but don't acknowledge it yet
+				// We'll only acknowledge after successful S3 upload
+				currentLSN := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
 
 				// Process the message based on the logical replication protocol
 				logicalMsg, err := pglogrepl.Parse(xld.WALData)
@@ -151,7 +188,7 @@ func (r *PGReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent) err
 						Table:     tableName,
 						Operation: model.InsertOp,
 						Timestamp: time.Now(),
-						LSN:       uint64(startLSN),
+						LSN:       uint64(currentLSN),
 						Data:      map[string]interface{}{},
 					}
 					
@@ -172,7 +209,7 @@ func (r *PGReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent) err
 						Table:     tableName,
 						Operation: model.UpdateOp,
 						Timestamp: time.Now(),
-						LSN:       uint64(startLSN),
+						LSN:       uint64(currentLSN),
 						Data:      map[string]interface{}{},
 					}
 					
@@ -193,7 +230,7 @@ func (r *PGReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent) err
 						Table:     tableName,
 						Operation: model.DeleteOp,
 						Timestamp: time.Now(),
-						LSN:       uint64(startLSN),
+						LSN:       uint64(currentLSN),
 						Data:      map[string]interface{}{},
 					}
 					
