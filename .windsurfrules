@@ -1,8 +1,13 @@
 Follow SOLID principles and idiomatic golang.
-Service must be blazingly fast and efficient
+Service must be blazingly fast and resilient to failures.
 This is a production codebase, so always write production-grade code.
 Use zerolog with logfmt format for logging key=value
 For postgres cdc reading references
 1. Golang https://github.com/PeerDB-io/peerdb
 2. Java https://github.com/debezium/debezium
 Before using online search for go code references, try to use go doc
+Unless you have solid reason use below libs for given usecases
+- parquet: github.com/apache/arrow-go/v18/parquet
+- postgres: github.com/jackc/pgx/v5
+- postgres replication: github.com/jackc/pglogrepl
+- aws: github.com/aws/aws-sdk-go-v2
