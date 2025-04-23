@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/parquet"
@@ -21,6 +22,7 @@ import (
 type ParquetWriter interface {
 	// WriteToBuffer writes events to an in-memory buffer and returns the bytes
 	WriteToBuffer(events []*model.CDCEvent) ([]byte, error)
+	GetCompressionCodec() string
 }
 
 type parquetWriter struct {
@@ -49,6 +51,10 @@ func NewParquetWriter(cfg *config.Config) ParquetWriter {
 	return &parquetWriter{
 		compression: compress.Codecs.Zstd,
 	}
+}
+
+func (w *parquetWriter) GetCompressionCodec() string {
+	return strings.ToLower(w.compression.String())
 }
 
 // createSchema creates the Parquet schema for CDC events
@@ -85,7 +91,7 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 	if err != nil {
 		log.Fatal().Err(err).Msg("create schema")
 	}
-	
+
 	return schema.NewSchema(root)
 }
 
@@ -96,7 +102,7 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 
 	// Create parquet writer with schema
 	schema := w.createSchema()
-	
+
 	// Create writer properties with ZSTD compression
 	props := parquet.NewWriterProperties(
 		parquet.WithCompression(w.compression),
@@ -196,15 +202,13 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 	return nil
 }
 
-
-
 // WriteToBuffer writes the given events to an in-memory buffer and returns the bytes.
 func (w *parquetWriter) WriteToBuffer(events []*model.CDCEvent) ([]byte, error) {
 	log.Info().Int("events", len(events)).Msg("writing CDC events to in-memory parquet buffer")
-	
+
 	// Create an in-memory buffer
 	buf := new(bytes.Buffer)
-	
+
 	// Write events to the buffer
 	if err := w.writeEventsToParquet(events, buf); err != nil {
 		return nil, err
