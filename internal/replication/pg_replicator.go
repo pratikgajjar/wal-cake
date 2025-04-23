@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -25,18 +26,25 @@ type PGReplicator interface {
 	Start(ctx context.Context, eventsCh chan<- *model.CDCEvent, ackCh <-chan uint64) error
 }
 
+type relationInfo struct {
+	name    string
+	columns []*pglogrepl.RelationMessageColumn
+}
+
 type pgReplicator struct {
 	cfg          *config.Config
 	repConn      *pgconn.PgConn
 	queryConn    *pgx.Conn
 	lastAckedLSN pglogrepl.LSN
-	currentLSN   pglogrepl.LSN
+	relations    map[uint32]relationInfo
 }
 
 // NewPGReplicator creates a new PostgreSQL replicator
 func NewPGReplicator(cfg *config.Config) PGReplicator {
+	relations := make(map[uint32]relationInfo)
 	return &pgReplicator{
-		cfg: cfg,
+		cfg:       cfg,
+		relations: relations,
 	}
 }
 
@@ -98,18 +106,28 @@ func (r *pgReplicator) getStartLSN(ctx context.Context) (pglogrepl.LSN, error) {
 	return identifyResult.XLogPos, nil
 }
 
-func (r *pgReplicator) SendStandyStatusUpdate(ctx context.Context) {
+func (r *pgReplicator) SendStandbyStatusUpdate(ctx context.Context, replyRequested bool) error {
 	status := pglogrepl.StandbyStatusUpdate{
 		WALWritePosition: r.lastAckedLSN,
 		WALFlushPosition: r.lastAckedLSN,
 		WALApplyPosition: r.lastAckedLSN,
 		ClientTime:       time.Now(),
+		ReplyRequested:   replyRequested,
 	}
+
 	err := pglogrepl.SendStandbyStatusUpdate(ctx, r.repConn, status)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to send standby status update")
+		return err
 	}
-	log.Info().Str("lsn", r.lastAckedLSN.String()).Msg("Tick: Updated acknowledged LSN position")
+	// Log standby status updates appropriately
+	if replyRequested {
+		log.Info().Str("lsn", r.lastAckedLSN.String()).Msg("Sent requested standby status update")
+	} else {
+		log.Debug().Str("lsn", r.lastAckedLSN.String()).Msg("Sent periodic standby status update")
+	}
+
+	return nil
 }
 
 func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ackCh <-chan uint64) error {
@@ -160,37 +178,48 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 	ticker := time.NewTicker(statusInterval)
 	defer ticker.Stop()
 
-	// Map to store relation info and column definitions
-	type relationInfo struct {
-		name    string
-		columns []*pglogrepl.RelationMessageColumn
-	}
+	// Set up a ticker for sending standby status updates
+	const receiveTimeout = 5 * time.Second
+	standbyMessageTicker := time.NewTicker(receiveTimeout)
+	defer standbyMessageTicker.Stop()
 
-	relations := make(map[uint32]relationInfo)
+	// Set up a non-blocking approach for message receiving
 
-	standbyMessageTimeout := time.Second * 5
-	nextStandbyMessageDeadline := time.Now().Add(standbyMessageTimeout)
 	for {
 		select {
 		case <-ctx.Done():
-			r.SendStandyStatusUpdate(ctx)
+			// Send a final status update before shutting down
+			_ = r.SendStandbyStatusUpdate(ctx, false)
 			return nil
 		case lsn := <-ackCh:
+			// Update the last acknowledged LSN
 			newLSN := pglogrepl.LSN(lsn)
-			r.lastAckedLSN = newLSN
-			log.Debug().Uint64("lsn", lsn).Msg("Acknowledged LSN")
-		case <-ticker.C:
-			r.SendStandyStatusUpdate(ctx)
-		default:
-			if time.Now().After(nextStandbyMessageDeadline) {
-				r.SendStandyStatusUpdate(ctx)
-				nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout)
+			if newLSN > r.lastAckedLSN {
+				r.lastAckedLSN = newLSN
+				log.Info().Uint64("lsn", lsn).Msg("Updated acknowledged LSN position")
+				// Send a status update immediately after receiving an acknowledgment
+				_ = r.SendStandbyStatusUpdate(ctx, false)
 			}
-			msg, err := r.repConn.ReceiveMessage(ctx)
-			if err != nil {
-				return fmt.Errorf("receive message error: %w", err)
-			}
+		case <-standbyMessageTicker.C:
+			// Send periodic status updates
+			_ = r.SendStandbyStatusUpdate(ctx, false)
 
+		default:
+			// Set up a timeout context for receiving messages
+			receiveCtx, cancel := context.WithTimeout(ctx, receiveTimeout)
+			msg, err := r.repConn.ReceiveMessage(receiveCtx)
+			cancel()
+			if err != nil {
+				if pgconn.Timeout(err) {
+					// This is just a timeout, continue
+					continue
+				} else if pgErr, ok := err.(*pgconn.PgError); ok {
+					log.Error().Err(pgErr).Str("code", pgErr.Code).Msg("received PG error")
+				} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					log.Error().Err(err).Msg("failed to receive message")
+				}
+				continue
+			}
 			// Check for error message
 			if errMsg, ok := msg.(*pgproto3.ErrorResponse); ok {
 				log.Error().Str("severity", errMsg.Severity).Str("code", errMsg.Code).Str("message", errMsg.Message).Msg("received Postgres error")
@@ -216,8 +245,7 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 				log.Debug().Uint64("server_wal_end", uint64(pkm.ServerWALEnd)).Msg("primary keepalive message")
 				// If the server requests a reply, send one immediately
 				if pkm.ReplyRequested {
-					r.SendStandyStatusUpdate(ctx)
-					nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout)
+					_ = r.SendStandbyStatusUpdate(ctx, true)
 				}
 			case pglogrepl.XLogDataByteID:
 				// Handle XLogData message (actual data)
@@ -228,120 +256,117 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 				}
 
 				// Calculate the new WAL position
-				newLSN := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-				nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout)
-				// Update our current WAL position, but don't acknowledge it yet
-				// We'll only acknowledge after successful S3 upload
-				r.currentLSN = newLSN
-
-				// Process the message based on the logical replication protocol
+				xLogPos := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
 				logicalMsg, err := pglogrepl.Parse(xld.WALData)
 				if err != nil {
 					log.Error().Err(err).Msg("failed to parse logical replication message")
 					continue
 				}
-
-				// Handle different message types
-				switch msg := logicalMsg.(type) {
-				case *pglogrepl.RelationMessage:
-					// Store relation info and column definitions for later use
-					relations[msg.RelationID] = relationInfo{
-						name:    msg.RelationName,
-						columns: msg.Columns,
-					}
-					log.Debug().Str("relation", msg.RelationName).Uint32("id", msg.RelationID).Int("columns", len(msg.Columns)).Msg("relation message")
-
-				case *pglogrepl.InsertMessage:
-					// Create CDC event for insert
-					relInfo, ok := relations[msg.RelationID]
-					if !ok {
-						log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for insert")
-						relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
-					}
-
-					// Create data map and extract values from tuple data
-					data := extractTupleData(msg.Tuple, relInfo.columns)
-
-					ev := &model.CDCEvent{
-						Table:     relInfo.name,
-						Operation: model.InsertOp,
-						Timestamp: time.Now(),
-						LSN:       uint64(r.currentLSN),
-						Data:      data,
-					}
-
-					log.Info().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Msg("insert event")
-					ch <- ev
-
-				case *pglogrepl.UpdateMessage:
-					// Create CDC event for update
-					relInfo, ok := relations[msg.RelationID]
-					if !ok {
-						log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for update")
-						relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
-					}
-
-					// Extract the new data from the tuple
-					data := extractTupleData(msg.NewTuple, relInfo.columns)
-
-					// Also extract old data for reference if available
-					oldData := extractTupleData(msg.OldTuple, relInfo.columns)
-					if len(oldData) > 0 {
-						// Add old values to the data with a prefix
-						for k, v := range oldData {
-							data["old_"+k] = v
-						}
-					}
-
-					ev := &model.CDCEvent{
-						Table:     relInfo.name,
-						Operation: model.UpdateOp,
-						Timestamp: time.Now(),
-						LSN:       uint64(r.currentLSN),
-						Data:      data,
-					}
-
-					log.Info().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("data_fields", len(data)).Msg("update event")
-					ch <- ev
-
-				case *pglogrepl.DeleteMessage:
-					// Create CDC event for delete
-					relInfo, ok := relations[msg.RelationID]
-					if !ok {
-						log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for delete")
-						relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
-					}
-
-					// For deletes, extract key data from the old tuple
-					data := extractTupleData(msg.OldTuple, relInfo.columns)
-
-					ev := &model.CDCEvent{
-						Table:     relInfo.name,
-						Operation: model.DeleteOp,
-						Timestamp: time.Now(),
-						LSN:       uint64(r.currentLSN),
-						Data:      data,
-					}
-
-					log.Info().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("data_fields", len(data)).Msg("delete event")
-					ch <- ev
-
-				case *pglogrepl.BeginMessage:
-					log.Debug().Uint32("xid", msg.Xid).Msg("begin transaction")
-
-				case *pglogrepl.CommitMessage:
-					log.Debug().Msg("commit transaction")
-
-				case *pglogrepl.TruncateMessage:
-					log.Debug().Msg("truncate message")
-
-				default:
-					log.Debug().Str("type", fmt.Sprintf("%T", msg)).Msg("other message type")
-				}
+				r.proccessLogicalMsg(logicalMsg, xLogPos, ch)
 			default:
 				// Any other message type
 				log.Warn().Msgf("received unexpected message byte ID: %d", copyData.Data[0])
 			}
 		}
+	}
+}
+
+func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos pglogrepl.LSN, ch chan<- *model.CDCEvent) {
+	// Handle different message types
+	switch msg := logicalMsg.(type) {
+	case *pglogrepl.RelationMessage:
+		// Store relation info and column definitions for later use
+		r.relations[msg.RelationID] = relationInfo{
+			name:    msg.RelationName,
+			columns: msg.Columns,
+		}
+		log.Debug().Str("relation", msg.RelationName).Uint32("id", msg.RelationID).Int("columns", len(msg.Columns)).Msg("relation message")
+
+	case *pglogrepl.InsertMessage:
+		// Create CDC event for insert
+		relInfo, ok := r.relations[msg.RelationID]
+		if !ok {
+			log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for insert")
+			relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
+		}
+
+		// Create data map and extract values from tuple data
+		data := extractTupleData(msg.Tuple, relInfo.columns)
+
+		ev := &model.CDCEvent{
+			Table:     relInfo.name,
+			Operation: model.InsertOp,
+			Timestamp: time.Now(),
+			LSN:       uint64(xLogPos),
+			Data:      data,
+		}
+
+		log.Info().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Msg("insert event")
+		ch <- ev
+
+	case *pglogrepl.UpdateMessage:
+		// Create CDC event for update
+		relInfo, ok := r.relations[msg.RelationID]
+		if !ok {
+			log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for update")
+			relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
+		}
+
+		// Extract the new data from the tuple
+		data := extractTupleData(msg.NewTuple, relInfo.columns)
+
+		// Also extract old data for reference if available
+		oldData := extractTupleData(msg.OldTuple, relInfo.columns)
+		if len(oldData) > 0 {
+			// Add old values to the data with a prefix
+			for k, v := range oldData {
+				data["old_"+k] = v
+			}
+		}
+
+		ev := &model.CDCEvent{
+			Table:     relInfo.name,
+			Operation: model.UpdateOp,
+			Timestamp: time.Now(),
+			LSN:       uint64(xLogPos),
+			Data:      data,
+		}
+
+		log.Info().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("data_fields", len(data)).Msg("update event")
+		ch <- ev
+
+	case *pglogrepl.DeleteMessage:
+		// Create CDC event for delete
+		relInfo, ok := r.relations[msg.RelationID]
+		if !ok {
+			log.Warn().Uint32("relationID", msg.RelationID).Msg("unknown relation ID for delete")
+			relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
+		}
+
+		// For deletes, extract key data from the old tuple
+		data := extractTupleData(msg.OldTuple, relInfo.columns)
+
+		ev := &model.CDCEvent{
+			Table:     relInfo.name,
+			Operation: model.DeleteOp,
+			Timestamp: time.Now(),
+			LSN:       uint64(xLogPos),
+			Data:      data,
+		}
+
+		log.Info().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("data_fields", len(data)).Msg("delete event")
+		ch <- ev
+
+	case *pglogrepl.BeginMessage:
+		log.Debug().Uint32("xid", msg.Xid).Msg("begin transaction")
+
+	case *pglogrepl.CommitMessage:
+		log.Debug().Msg("commit transaction")
+
+	case *pglogrepl.TruncateMessage:
+		log.Debug().Msg("truncate message")
+
+	default:
+		log.Debug().Str("type", fmt.Sprintf("%T", msg)).Msg("other message type")
 	}
 }
