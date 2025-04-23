@@ -6,9 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
-	"github.com/jackc/pglogrepl"
 	"github.com/rs/zerolog/log"
 
 	"git.famapp.in/fampay-inc/wal-cake/internal/config"
@@ -25,48 +26,134 @@ type PGReplicator interface {
 }
 
 type pgReplicator struct {
-	cfg  *config.Config
-	conn *pgconn.PgConn
+	cfg          *config.Config
+	repConn      *pgconn.PgConn
+	queryConn    *pgx.Conn
 	lastAckedLSN pglogrepl.LSN
+	currentLSN   pglogrepl.LSN
 }
 
 // NewPGReplicator creates a new PostgreSQL replicator
 func NewPGReplicator(cfg *config.Config) PGReplicator {
 	return &pgReplicator{
 		cfg: cfg,
-		lastAckedLSN: pglogrepl.LSN(0),
 	}
+}
+
+// ensurePublication ensures the publication exists
+func (r *pgReplicator) ensurePublication(ctx context.Context) error {
+	var exists bool
+	err := r.queryConn.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = $1)", r.cfg.Publication).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("failed to check if publication exists: %w", err)
+	}
+
+	if !exists {
+		_, err = r.queryConn.Exec(ctx, fmt.Sprintf("CREATE PUBLICATION %s FOR ALL TABLES", r.cfg.Publication))
+		if err != nil {
+			return fmt.Errorf("failed to create publication: %w", err)
+		}
+		log.Info().Str("publication", r.cfg.Publication).Msg("Created publication")
+	} else {
+		log.Info().Str("publication", r.cfg.Publication).Msg("Publication already exists")
+	}
+
+	return nil
+}
+
+// ensureReplicationSlot ensures the replication slot exists and is not active
+func (r *pgReplicator) ensureReplicationSlot(ctx context.Context) error {
+	var exists bool
+	err := r.queryConn.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)", r.cfg.Slot).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("failed to check if replication slot exists: %w", err)
+	}
+	if !exists {
+		_, err = pglogrepl.CreateReplicationSlot(ctx, r.repConn, r.cfg.Slot, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Temporary: false, Mode: pglogrepl.LogicalReplication})
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("failed to create replication slot: %w", err)
+		}
+		log.Info().Str("slot", r.cfg.Slot).Msg("Created replication slot")
+	}
+	return nil
+}
+
+// getStartLSN gets the confirmed LSN position from the replication slot
+func (r *pgReplicator) getStartLSN(ctx context.Context) (pglogrepl.LSN, error) {
+	// First try to get the confirmed LSN from the replication slot
+	var lsn pglogrepl.LSN
+	err := r.queryConn.QueryRow(ctx, "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1", r.cfg.Slot).Scan(&lsn)
+	if err == nil {
+		log.Info().Str("lsn", lsn.String()).Msg("Starting replication from confirmed LSN position")
+		return lsn, nil
+	}
+
+	// If we couldn't get a confirmed LSN, use the system position
+	identifyResult, err := pglogrepl.IdentifySystem(ctx, r.repConn)
+	if err != nil {
+		return 0, fmt.Errorf("failed to identify system: %w", err)
+	}
+
+	log.Info().Str("lsn", identifyResult.XLogPos.String()).Msg("Starting replication from system XLogPos")
+	return identifyResult.XLogPos, nil
+}
+
+func (r *pgReplicator) SendStandyStatusUpdate(ctx context.Context) {
+	status := pglogrepl.StandbyStatusUpdate{
+		WALWritePosition: r.lastAckedLSN,
+		WALFlushPosition: r.lastAckedLSN,
+		WALApplyPosition: r.lastAckedLSN,
+		ClientTime:       time.Now(),
+	}
+	err := pglogrepl.SendStandbyStatusUpdate(ctx, r.repConn, status)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to send standby status update")
+	}
+	log.Info().Str("lsn", r.lastAckedLSN.String()).Msg("Tick: Updated acknowledged LSN position")
 }
 
 func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ackCh <-chan uint64) error {
 	log.Info().Str("slot", r.cfg.Slot).Str("publication", r.cfg.Publication).Msg("starting PostgreSQL replication")
-	
+
 	var err error
 	// Connect via pgconn for replication
-	r.conn, err = pgconn.Connect(ctx, r.cfg.PGConn)
+	r.repConn, err = pgconn.Connect(ctx, r.cfg.PGConn+"?replication=database")
 	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+		return fmt.Errorf("failed to connect to database for replication: %w", err)
 	}
-	defer r.conn.Close(ctx)
+	defer r.repConn.Close(ctx)
 
-	// Create replication slot
-	replSlot := r.cfg.Slot
-	_, err = pglogrepl.CreateReplicationSlot(ctx, r.conn, replSlot, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Temporary: false})
-	if err != nil && !strings.Contains(err.Error(), "already exists") {
-		return fmt.Errorf("failed to create slot: %w", err)
+	// Create a separate connection for regular queries
+	r.queryConn, err = pgx.Connect(ctx, r.cfg.PGConn)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database for queries: %w", err)
+	}
+	defer r.queryConn.Close(ctx)
+
+	// Ensure publication exists
+	if err := r.ensurePublication(ctx); err != nil {
+		return fmt.Errorf("failed to ensure publication: %w", err)
 	}
 
-	pluginArgs := []string{fmt.Sprintf("proto_version '1'"), fmt.Sprintf("publication_names '%s'", r.cfg.Publication)}
+	// Ensure replication slot exists
+	if err := r.ensureReplicationSlot(ctx); err != nil {
+		return fmt.Errorf("failed to ensure replication slot: %w", err)
+	}
+
+	// Get the starting LSN position
+	r.lastAckedLSN, err = r.getStartLSN(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get starting LSN: %w", err)
+	}
+
+	// Set up plugin arguments
+	pluginArgs := []string{
+		"proto_version '1'",
+		fmt.Sprintf("publication_names '%s'", r.cfg.Publication),
+	}
 
 	// Start replication
-	startLSN := pglogrepl.LSN(0)
-	if r.cfg.StartLSN != "" {
-		startLSN, err = pglogrepl.ParseLSN(r.cfg.StartLSN)
-		if err != nil {
-			return fmt.Errorf("invalid start-lsn: %w", err)
-		}
-	}
-	if err := pglogrepl.StartReplication(ctx, r.conn, replSlot, startLSN, pglogrepl.StartReplicationOptions{PluginArgs: pluginArgs}); err != nil {
+	if err := pglogrepl.StartReplication(ctx, r.repConn, r.cfg.Slot, r.lastAckedLSN, pglogrepl.StartReplicationOptions{PluginArgs: pluginArgs}); err != nil {
 		return fmt.Errorf("failed to start replication: %w", err)
 	}
 
@@ -80,44 +167,20 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 	}
 
 	relations := make(map[uint32]relationInfo)
-	
-	// We'll use a direct approach for message handling instead of channels
-	
+
 	for {
 		select {
 		case <-ctx.Done():
+			r.SendStandyStatusUpdate(ctx)
 			return nil
-		
 		case lsn := <-ackCh:
-			// Update the last acknowledged LSN
 			newLSN := pglogrepl.LSN(lsn)
-			if newLSN > r.lastAckedLSN {
-				r.lastAckedLSN = newLSN
-				log.Info().Uint64("lsn", lsn).Msg("Updated acknowledged LSN position")
-				
-				// Send a standby status update with the new LSN
-				status := pglogrepl.StandbyStatusUpdate{
-					WALWritePosition: r.lastAckedLSN,
-				}
-				err := pglogrepl.SendStandbyStatusUpdate(ctx, r.conn, status)
-				if err != nil {
-					log.Error().Err(err).Msg("failed to send standby status update after LSN acknowledgment")
-				}
-			}
-		
+			r.lastAckedLSN = newLSN
+			log.Debug().Uint64("lsn", lsn).Msg("Acknowledged LSN")
 		case <-ticker.C:
-			// Send periodic standby status update
-			// Only acknowledge up to the last confirmed LSN
-			status := pglogrepl.StandbyStatusUpdate{
-				WALWritePosition: r.lastAckedLSN,
-			}
-			err := pglogrepl.SendStandbyStatusUpdate(ctx, r.conn, status)
-			if err != nil {
-				log.Warn().Err(err).Msg("failed to send standby status update")
-			}
-		
+			r.SendStandyStatusUpdate(ctx)
 		default:
-			msg, err := r.conn.ReceiveMessage(ctx)
+			msg, err := r.repConn.ReceiveMessage(ctx)
 			if err != nil {
 				return fmt.Errorf("receive message error: %w", err)
 			}
@@ -145,13 +208,14 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 					continue
 				}
 				log.Debug().Uint64("server_wal_end", uint64(pkm.ServerWALEnd)).Msg("primary keepalive message")
-				
+
 				// If the server requests a reply, send one immediately
 				if pkm.ReplyRequested {
 					// When the server requests a reply, we still only acknowledge up to the last confirmed LSN
-					// This ensures we don't acknowledge data that hasn't been safely stored in S3
-					status := pglogrepl.StandbyStatusUpdate{WALWritePosition: r.lastAckedLSN}
-					err := pglogrepl.SendStandbyStatusUpdate(ctx, r.conn, status)
+					status := pglogrepl.StandbyStatusUpdate{
+						WALWritePosition: r.lastAckedLSN,
+					}
+					err := pglogrepl.SendStandbyStatusUpdate(ctx, r.repConn, status)
 					if err != nil {
 						log.Error().Err(err).Msg("failed to send requested status update")
 					}
@@ -164,9 +228,12 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 					continue
 				}
 
+				// Calculate the new WAL position
+				newLSN := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+
 				// Update our current WAL position, but don't acknowledge it yet
 				// We'll only acknowledge after successful S3 upload
-				currentLSN := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+				r.currentLSN = newLSN
 
 				// Process the message based on the logical replication protocol
 				logicalMsg, err := pglogrepl.Parse(xld.WALData)
@@ -184,7 +251,7 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 						columns: msg.Columns,
 					}
 					log.Debug().Str("relation", msg.RelationName).Uint32("id", msg.RelationID).Int("columns", len(msg.Columns)).Msg("relation message")
-					
+
 				case *pglogrepl.InsertMessage:
 					// Create CDC event for insert
 					relInfo, ok := relations[msg.RelationID]
@@ -200,13 +267,13 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 						Table:     relInfo.name,
 						Operation: model.InsertOp,
 						Timestamp: time.Now(),
-						LSN:       uint64(currentLSN),
+						LSN:       uint64(r.currentLSN),
 						Data:      data,
 					}
 
 					log.Info().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Msg("insert event")
 					ch <- ev
-					
+
 				case *pglogrepl.UpdateMessage:
 					// Create CDC event for update
 					relInfo, ok := relations[msg.RelationID]
@@ -231,13 +298,13 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 						Table:     relInfo.name,
 						Operation: model.UpdateOp,
 						Timestamp: time.Now(),
-						LSN:       uint64(currentLSN),
+						LSN:       uint64(r.currentLSN),
 						Data:      data,
 					}
 
 					log.Info().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("data_fields", len(data)).Msg("update event")
 					ch <- ev
-					
+
 				case *pglogrepl.DeleteMessage:
 					// Create CDC event for delete
 					relInfo, ok := relations[msg.RelationID]
@@ -253,22 +320,22 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 						Table:     relInfo.name,
 						Operation: model.DeleteOp,
 						Timestamp: time.Now(),
-						LSN:       uint64(currentLSN),
+						LSN:       uint64(r.currentLSN),
 						Data:      data,
 					}
 
 					log.Info().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("data_fields", len(data)).Msg("delete event")
 					ch <- ev
-					
+
 				case *pglogrepl.BeginMessage:
 					log.Debug().Uint32("xid", msg.Xid).Msg("begin transaction")
-				
+
 				case *pglogrepl.CommitMessage:
 					log.Debug().Msg("commit transaction")
-				
+
 				case *pglogrepl.TruncateMessage:
 					log.Debug().Msg("truncate message")
-				
+
 				default:
 					log.Debug().Str("type", fmt.Sprintf("%T", msg)).Msg("other message type")
 				}
