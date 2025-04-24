@@ -132,18 +132,14 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 		log.Warn().Msg("no events to write after filtering")
 		return nil
 	}
-
 	// Create a writer that can tell its position
 	wt := &writerTell{w: writer}
-
 	// Create parquet writer with schema
 	schema := w.createSchema()
 	// Create parquet file writer
 	fileWriter := file.NewParquetWriter(wt, schema.Root(), file.WithWriterProps(w.props))
-
 	// Create row group with a reasonable size
 	rg := fileWriter.AppendRowGroup()
-
 	// Prepare column data arrays once with the exact size needed
 	tableData := make([]parquet.ByteArray, validCount)
 	opData := make([]parquet.ByteArray, validCount)
@@ -157,26 +153,20 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 		if !w.shouldIncludeEvent(ev) {
 			continue
 		}
-
 		// Table column
 		tableData[index] = []byte(ev.Table)
-
 		// Operation column
 		opData[index] = []byte(ev.Operation)
-
 		// Timestamp column
 		tsData[index] = ev.Timestamp.UnixNano() / int64(time.Millisecond)
-
 		// LSN column
 		lsnData[index] = int64(ev.LSN)
-
 		// Data JSON column
 		jsonData, err := json.Marshal(ev.Data)
 		if err != nil {
 			return fmt.Errorf("marshal data to JSON: %w", err)
 		}
 		dataJsonValues[index] = jsonData
-
 		index++
 	}
 
