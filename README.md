@@ -2,6 +2,8 @@
 
 WAL-Cake is a blazingly fast, production-grade Change Data Capture (CDC) service that streams events from PostgreSQL to an S3 data lake in Parquet format. It leverages PostgreSQL's logical replication to capture database changes in real-time and efficiently processes them for analytics and data warehousing.
 
+![WAL-Cake Logo](static/wal-cake-logo.png)
+
 ## Features
 
 - **Real-time CDC**: Capture INSERT, UPDATE, DELETE, and COMMIT operations from PostgreSQL WAL
