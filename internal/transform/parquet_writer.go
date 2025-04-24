@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/parquet"
@@ -30,9 +29,8 @@ type ParquetWriter interface {
 }
 
 type parquetWriter struct {
-	compression       compress.Compression
-	compressionLevel int
-	filters          []EventFilter
+	props   *parquet.WriterProperties
+	filters []EventFilter
 }
 
 // writerTell is a wrapper that implements io.Writer and has a Tell method
@@ -53,15 +51,22 @@ func (w *writerTell) Tell() int64 {
 
 // NewParquetWriter creates a new Parquet writer with ZSTD compression
 func NewParquetWriter() ParquetWriter {
+	// Create writer properties with ZSTD compression
+	props := parquet.NewWriterProperties(
+		parquet.WithCompression(compress.Codecs.Zstd),
+		parquet.WithCompressionLevel(3),
+		parquet.WithDictionaryDefault(true),
+		parquet.WithStats(true),
+		parquet.WithCreatedBy("wal-cake"),
+	)
 	return &parquetWriter{
-		compression:       compress.Codecs.Zstd,
-		compressionLevel: 3, // Set ZSTD compression level to 3
-		filters:          make([]EventFilter, 0),
+		props:   props,
+		filters: make([]EventFilter, 0),
 	}
 }
 
 func (w *parquetWriter) GetCompressionCodec() string {
-	return strings.ToLower(w.compression.String())
+	return w.props.Compression().String()
 }
 
 // AddFilter adds an event filter to the writer
@@ -133,18 +138,8 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 
 	// Create parquet writer with schema
 	schema := w.createSchema()
-
-	// Create writer properties with ZSTD compression level 3
-	props := parquet.NewWriterProperties(
-		parquet.WithCompression(w.compression),
-		parquet.WithCompressionLevel(w.compressionLevel),
-		parquet.WithDictionaryDefault(true),
-		parquet.WithStats(true),
-		parquet.WithCreatedBy("wal-cake CDC to S3"),
-	)
-
 	// Create parquet file writer
-	fileWriter := file.NewParquetWriter(wt, schema.Root(), file.WithWriterProps(props))
+	fileWriter := file.NewParquetWriter(wt, schema.Root(), file.WithWriterProps(w.props))
 
 	// Create row group with a reasonable size
 	rg := fileWriter.AppendRowGroup()
@@ -162,26 +157,26 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 		if !w.shouldIncludeEvent(ev) {
 			continue
 		}
-		
+
 		// Table column
 		tableData[index] = []byte(ev.Table)
-		
+
 		// Operation column
 		opData[index] = []byte(ev.Operation)
-		
+
 		// Timestamp column
 		tsData[index] = ev.Timestamp.UnixNano() / int64(time.Millisecond)
-		
+
 		// LSN column
 		lsnData[index] = int64(ev.LSN)
-		
+
 		// Data JSON column
 		jsonData, err := json.Marshal(ev.Data)
 		if err != nil {
 			return fmt.Errorf("marshal data to JSON: %w", err)
 		}
 		dataJsonValues[index] = jsonData
-		
+
 		index++
 	}
 
