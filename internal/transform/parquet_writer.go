@@ -30,8 +30,9 @@ type ParquetWriter interface {
 }
 
 type parquetWriter struct {
-	compression compress.Compression
-	filters     []EventFilter
+	compression       compress.Compression
+	compressionLevel int
+	filters          []EventFilter
 }
 
 // writerTell is a wrapper that implements io.Writer and has a Tell method
@@ -53,8 +54,9 @@ func (w *writerTell) Tell() int64 {
 // NewParquetWriter creates a new Parquet writer with ZSTD compression
 func NewParquetWriter() ParquetWriter {
 	return &parquetWriter{
-		compression: compress.Codecs.Zstd,
-		filters:     make([]EventFilter, 0),
+		compression:       compress.Codecs.Zstd,
+		compressionLevel: 3, // Set ZSTD compression level to 3
+		filters:          make([]EventFilter, 0),
 	}
 }
 
@@ -132,9 +134,10 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 	// Create parquet writer with schema
 	schema := w.createSchema()
 
-	// Create writer properties with ZSTD compression
+	// Create writer properties with ZSTD compression level 3
 	props := parquet.NewWriterProperties(
 		parquet.WithCompression(w.compression),
+		parquet.WithCompressionLevel(w.compressionLevel),
 		parquet.WithDictionaryDefault(true),
 		parquet.WithStats(true),
 		parquet.WithCreatedBy("wal-cake CDC to S3"),
