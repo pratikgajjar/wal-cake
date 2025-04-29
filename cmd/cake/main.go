@@ -44,12 +44,12 @@ func main() {
 
 	repl := replication.NewPGReplicator(cfg)
 	transformer := transform.NewParquetWriter()
-	
+
 	// Add filter to exclude commit events from Parquet files
 	transformer.AddFilter(func(event *model.CDCEvent) bool {
 		return event.Operation != model.CommitOp
 	})
-	
+
 	uploader := storage.NewS3Uploader(cfg)
 
 	// Start the replicator with LSN acknowledgment
@@ -91,6 +91,8 @@ func main() {
 
 				// Reset buffer and maxLSN
 				buffer = make([]*model.CDCEvent, 0, cfg.BatchSize)
+				// Reset ticker to avoid small batches right after this one
+				ticker.Reset(cfg.FlushInterval)
 			}
 
 		case <-ticker.C:
