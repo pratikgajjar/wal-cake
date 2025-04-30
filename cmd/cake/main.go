@@ -24,6 +24,8 @@ type CDCBatch struct {
 	Events []*model.CDCEvent
 }
 
+type Empty struct{}
+
 // LastLSN returns the highest LSN in the batch
 func (b *CDCBatch) LastLSN() uint64 {
 	if len(b.Events) == 0 {
@@ -32,48 +34,50 @@ func (b *CDCBatch) LastLSN() uint64 {
 	return b.Events[len(b.Events)-1].LSN
 }
 
-// DatePartition represents a slice of events from the same date
-type DatePartition struct {
-	Date   string           // Date in YYYY/MM/DD format
-	Events []*model.CDCEvent // Slice of events for this date (reference to original data)
+type PartPos struct {
+	StartIdx int
+	EndIdx   int
+	Date     string
 }
 
-// DatePartitionIterator allows iterating over date-partitioned batches of events
-type DatePartitionIterator struct {
-	batch     *CDCBatch
-	cursorPos int
-}
+type PartChan <-chan PartPos
 
-// NewDatePartitionIterator creates a new iterator for date-partitioned events
-func (b *CDCBatch) NewDatePartitionIterator() *DatePartitionIterator {
-	return &DatePartitionIterator{
-		batch:     b,
-		cursorPos: 0,
-	}
-}
+func (b *CDCBatch) Iter(ctx context.Context) PartChan {
+	posCh := make(chan PartPos)
 
-// Next returns the next date partition or nil if there are no more partitions
-func (it *DatePartitionIterator) Next() *DatePartition {
-	if it.cursorPos >= len(it.batch.Events) {
-		return nil // No more events
-	}
-	
-	// Get the date for the current group of events
-	currentDate := it.batch.Events[it.cursorPos].Timestamp.Format("2006/01/02")
-	
-	// Find all events with the same date
-	startIdx := it.cursorPos
-	for it.cursorPos < len(it.batch.Events) && 
-		it.batch.Events[it.cursorPos].Timestamp.Format("2006/01/02") == currentDate {
-		it.cursorPos++
-	}
-	endIdx := it.cursorPos
-	
-	// Return the partition with a slice reference to the original events
-	return &DatePartition{
-		Date:   currentDate,
-		Events: it.batch.Events[startIdx:endIdx],
-	}
+	go func() {
+		defer close(posCh)
+
+		if len(b.Events) == 0 {
+			return
+		}
+
+		cursorPos := 0
+		for cursorPos < len(b.Events) {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			currentDate := b.Events[cursorPos].Timestamp.Format("2006/01/02")
+
+			startIdx := cursorPos
+			for cursorPos < len(b.Events) &&
+				b.Events[cursorPos].Timestamp.Format("2006/01/02") == currentDate {
+				cursorPos++
+			}
+			endIdx := cursorPos
+
+			select {
+			case posCh <- PartPos{StartIdx: startIdx, EndIdx: endIdx, Date: currentDate}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return posCh
 }
 
 func main() {
@@ -184,7 +188,7 @@ func withRetry[T any](ctx context.Context, maxRetries int, initialDelay time.Dur
 
 		// Handle the error
 		shouldContinue := onError(err, attempt)
-		
+
 		// If this is the last attempt or we should not continue, give up
 		if attempt == maxRetries || !shouldContinue {
 			return result, false
@@ -200,72 +204,43 @@ func withRetry[T any](ctx context.Context, maxRetries int, initialDelay time.Dur
 
 // processBatch processes a batch of CDC events, writing them directly to S3 and acknowledging LSN on success
 func processBatch(ctx context.Context, cfg *config.Config, batch *CDCBatch, pw transform.ParquetWriter, up storage.S3Uploader, ackCh chan<- uint64) {
-	// Skip empty batches
 	if len(batch.Events) == 0 {
 		return
 	}
 
-	// Define retry parameters
 	maxRetries := 3
 	initialDelay := 1 * time.Second
-	
-	// Create an iterator to process events by date partition
-	iterator := batch.NewDatePartitionIterator()
-	
-	// Log the total events in the batch
+
 	log.Info().Int("events", len(batch.Events)).Uint64("maxLSN", batch.LastLSN()).Msg("Processing batch")
-	
-	// Process each date partition
-	var partition *DatePartition
-	for partition = iterator.Next(); partition != nil; partition = iterator.Next() {
-		// Log the events in this partition
-		log.Info().Int("events", len(partition.Events)).Str("date", partition.Date).Msg("Processing events for date partition")
-		
-		// Generate a unique key for this date's batch
-		timestamp := time.Now().UnixMicro() // Use current time for uniqueness
-		key := fmt.Sprintf("%s/%s/%d.%s.parquet", cfg.Namespace, partition.Date, timestamp, pw.GetCompressionCodec())
-		
-		// Write events for this date directly to memory as parquet with retry
-		parquetData, writeSuccess := withRetry(ctx, maxRetries, initialDelay, 
-			func() ([]byte, error) {
-				return pw.WriteToBuffer(partition.Events)
-			},
-			func(err error, attempt int) bool {
-				log.Error().Err(err).Int("attempt", attempt).Str("date", partition.Date).Msg("Failed to write Parquet to memory buffer")
-				if attempt == maxRetries {
-					log.Error().Err(err).Str("date", partition.Date).Msg("All attempts to write Parquet failed for date")
-				}
-				return true // Always retry until max retries
-			},
-		)
 
-		if !writeSuccess {
-			// Skip to next date partition if writing failed
-			continue
+	for pos := range batch.Iter(ctx) {
+		eventsSlice := batch.Events[pos.StartIdx:pos.EndIdx]
+		timestamp := eventsSlice[pos.StartIdx].Timestamp.UnixMicro()
+		key := fmt.Sprintf("%s/%s/%d.%s.parquet", cfg.Namespace, pos.Date, timestamp, pw.GetCompressionCodec())
+
+		parquetData, err := pw.WriteToBuffer(eventsSlice)
+		if err != nil {
+			log.Fatal().Err(err).Str("date", pos.Date).Msg("Failed to write Parquet to memory buffer")
 		}
-
-		// Upload the parquet data directly to S3 with retry
 		_, uploadSuccess := withRetry(ctx, maxRetries, initialDelay,
-			func() (struct{}, error) {
+			func() (Empty, error) {
 				err := up.UploadBytes(ctx, key, parquetData)
-				return struct{}{}, err
+				return Empty{}, err
 			},
 			func(err error, attempt int) bool {
-				log.Error().Err(err).Int("attempt", attempt).Str("date", partition.Date).Msg("Failed to upload Parquet to S3")
+				log.Error().Err(err).Int("attempt", attempt).Str("key", key).Msg("Failed to upload Parquet to S3")
 				if attempt == maxRetries {
-					log.Error().Err(err).Str("date", partition.Date).Msg("All attempts to upload to S3 failed for date")
+					log.Error().Err(err).Str("key", key).Msg("All attempts to upload to S3 failed")
 				}
-				return true // Always retry until max retries
+				return true
 			},
 		)
 
 		if uploadSuccess {
-			// Success for this date's batch!
-			log.Info().Int("events", len(partition.Events)).Str("key", key).Str("date", partition.Date).Msg("Successfully uploaded batch to S3 for date")
+			log.Info().Int("events", len(eventsSlice)).Str("key", key).Str("date", pos.Date).Msg("Successfully uploaded batch to S3 for date")
 		}
 	}
 
-	// Send the max LSN to the acknowledgment channel after all date partitions have been processed
 	select {
 	case ackCh <- batch.LastLSN():
 		log.Debug().Uint64("lsn", batch.LastLSN()).Msg("Sent LSN Ack")
