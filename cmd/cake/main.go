@@ -238,6 +238,8 @@ func processBatch(ctx context.Context, cfg *config.Config, batch *CDCBatch, pw t
 
 		if uploadSuccess {
 			log.Info().Int("events", len(eventsSlice)).Str("key", key).Str("date", pos.Date).Msg("Successfully uploaded batch to S3 for date")
+		} else {
+			log.Fatal().Err(err).Str("key", key).Msg("Failed to upload Parquet to S3")
 		}
 	}
 
