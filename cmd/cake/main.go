@@ -46,7 +46,9 @@ func main() {
 	processor := buffer.NewParquetBatchProcessor(
 		transformer,
 		uploader,
-		&buffer.BatchProcessorConfig{},
+		&buffer.BatchProcessorConfig{
+			Namespace: cfg.Namespace,
+		},
 	)
 
 	// Create ring buffer with the specified configuration
@@ -80,5 +82,3 @@ func main() {
 	<-ctx.Done()
 	log.Info().Msg("Shutting down")
 }
-
-

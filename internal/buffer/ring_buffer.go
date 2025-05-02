@@ -71,7 +71,7 @@ type RingBuffer struct {
 func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, processor BatchProcessor, ackCh chan<- uint64) *RingBuffer {
 	// Size = concurrency * batchSize to ensure we have enough space
 	size := concurrency * batchSize
-	
+
 	rb := &RingBuffer{
 		buffer:       make([]*RingBufferEvent, size),
 		size:         size,
@@ -83,7 +83,7 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 		processor:    processor,
 		ackCh:        ackCh,
 	}
-	
+
 	// Initialize the buffer with empty events
 	for i := 0; i < size; i++ {
 		rb.buffer[i] = &RingBufferEvent{
@@ -91,7 +91,7 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 		}
 		rb.buffer[i].SetStatus(StatusPending)
 	}
-	
+
 	return rb
 }
 
@@ -100,25 +100,25 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 func (rb *RingBuffer) Add(event *model.CDCEvent) bool {
 	writePos := int(rb.writeIdx.Load()) % rb.size
 	readPos := int(rb.readIdx.Load()) % rb.size
-	
+
 	// Check if buffer is full
 	nextWritePos := (writePos + 1) % rb.size
 	if nextWritePos == readPos {
 		return false
 	}
-	
+
 	// Add the event to the buffer
 	rb.buffer[writePos] = &RingBufferEvent{
 		Event: event,
 	}
 	rb.buffer[writePos].SetStatus(StatusPending)
-	
+
 	// Update write position
 	rb.writeIdx.Add(1)
-	
+
 	// Check if we have enough events to create a new segment
 	rb.checkForNewSegment()
-	
+
 	return true
 }
 
@@ -126,26 +126,26 @@ func (rb *RingBuffer) Add(event *model.CDCEvent) bool {
 func (rb *RingBuffer) checkForNewSegment() {
 	rb.segmentsLock.Lock()
 	defer rb.segmentsLock.Unlock()
-	
+
 	writePos := int(rb.writeIdx.Load())
 	readPos := int(rb.readIdx.Load())
-	
+
 	// If we have at least batchSize events, create a new segment
 	if writePos-readPos >= rb.batchSize {
 		segment := Segment{
 			StartIdx: readPos % rb.size,
 			EndIdx:   (readPos + rb.batchSize - 1) % rb.size,
 		}
-		
+
 		// Mark events in this segment as processing
 		for i := 0; i < rb.batchSize; i++ {
 			idx := (readPos + i) % rb.size
 			rb.buffer[idx].SetStatus(StatusProcessing)
 		}
-		
+
 		// Update read position
 		rb.readIdx.Add(int64(rb.batchSize))
-		
+
 		// Send segment for processing
 		select {
 		case rb.segments <- segment:
@@ -173,33 +173,33 @@ func (rb *RingBuffer) checkForNewSegment() {
 func (rb *RingBuffer) createTickerSegment() {
 	rb.segmentsLock.Lock()
 	defer rb.segmentsLock.Unlock()
-	
+
 	writePos := int(rb.writeIdx.Load())
 	readPos := int(rb.readIdx.Load())
-	
+
 	// If there are no pending events, do nothing
 	if writePos <= readPos {
 		return
 	}
-	
+
 	// Calculate how many events we have pending
 	pendingCount := writePos - readPos
-	
+
 	// Create a segment with all pending events
 	segment := Segment{
 		StartIdx: readPos % rb.size,
 		EndIdx:   (readPos + pendingCount - 1) % rb.size,
 	}
-	
+
 	// Mark events in this segment as processing
 	for i := 0; i < pendingCount; i++ {
 		idx := (readPos + i) % rb.size
 		rb.buffer[idx].SetStatus(StatusProcessing)
 	}
-	
+
 	// Update read position
 	rb.readIdx.Add(int64(pendingCount))
-	
+
 	// Send segment for processing
 	select {
 	case rb.segments <- segment:
@@ -225,15 +225,15 @@ func (rb *RingBuffer) createTickerSegment() {
 // It finds the highest contiguous LSN where all events have been processed
 func (rb *RingBuffer) getMaxProcessedLSN() uint64 {
 	var maxLSN uint64
-	
+
 	// Start from the beginning of the buffer
 	readPos := int(rb.readIdx.Load()) - rb.size // Go back to potentially find processed events
 	if readPos < 0 {
 		readPos = 0
 	}
-	
+
 	writePos := int(rb.writeIdx.Load())
-	
+
 	// Find the last contiguous processed event
 	for i := readPos; i < writePos; i++ {
 		idx := i % rb.size
@@ -249,7 +249,7 @@ func (rb *RingBuffer) getMaxProcessedLSN() uint64 {
 			}
 		}
 	}
-	
+
 	return maxLSN
 }
 
@@ -257,7 +257,7 @@ func (rb *RingBuffer) getMaxProcessedLSN() uint64 {
 func (rb *RingBuffer) Start(ctx context.Context, eventsCh <-chan *model.CDCEvent) error {
 	// Start the worker pool
 	g, ctx := errgroup.WithContext(ctx)
-	
+
 	// Start ticker handler
 	g.Go(func() error {
 		for {
@@ -269,12 +269,12 @@ func (rb *RingBuffer) Start(ctx context.Context, eventsCh <-chan *model.CDCEvent
 			}
 		}
 	})
-	
+
 	// Start LSN acknowledgment handler
 	g.Go(func() error {
 		ackTicker := time.NewTicker(time.Second)
 		defer ackTicker.Stop()
-		
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -293,7 +293,7 @@ func (rb *RingBuffer) Start(ctx context.Context, eventsCh <-chan *model.CDCEvent
 			}
 		}
 	})
-	
+
 	// Start workers to process segments
 	for i := 0; i < rb.concurrency; i++ {
 		workerID := i
@@ -301,7 +301,7 @@ func (rb *RingBuffer) Start(ctx context.Context, eventsCh <-chan *model.CDCEvent
 			return rb.worker(ctx, workerID)
 		})
 	}
-	
+
 	// Start event receiver
 	g.Go(func() error {
 		for {
@@ -322,7 +322,7 @@ func (rb *RingBuffer) Start(ctx context.Context, eventsCh <-chan *model.CDCEvent
 			}
 		}
 	})
-	
+
 	// Wait for all goroutines to complete
 	return g.Wait()
 }
@@ -330,7 +330,7 @@ func (rb *RingBuffer) Start(ctx context.Context, eventsCh <-chan *model.CDCEvent
 // worker processes segments from the segments channel
 func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 	log.Info().Int("workerID", workerID).Msg("Starting ring buffer worker")
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -338,7 +338,7 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 		case segment := <-rb.segments:
 			// Extract events for this segment
 			events := make([]*model.CDCEvent, 0, rb.batchSize)
-			
+
 			// Calculate the actual number of events in this segment
 			var count int
 			if segment.EndIdx >= segment.StartIdx {
@@ -347,7 +347,7 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 				// Handle wrap-around case
 				count = rb.size - segment.StartIdx + segment.EndIdx + 1
 			}
-			
+
 			// Collect events
 			for i := 0; i < count; i++ {
 				idx := (segment.StartIdx + i) % rb.size
@@ -355,7 +355,7 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 					events = append(events, rb.buffer[idx].Event)
 				}
 			}
-			
+
 			// Process the batch
 			if len(events) > 0 {
 				log.Info().
@@ -364,9 +364,9 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 					Int("startIdx", segment.StartIdx).
 					Int("endIdx", segment.EndIdx).
 					Msg("Processing segment")
-				
+
 				err := rb.processor.Process(ctx, events)
-				
+
 				// Mark events as processed or reset them based on the result
 				for i := 0; i < count; i++ {
 					idx := (segment.StartIdx + i) % rb.size
