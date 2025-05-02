@@ -17,6 +17,7 @@ type Config struct {
 	S3Bucket      string
 	Region        string
 	BatchSize     int
+	Concurrency   int
 	FlushInterval time.Duration
 }
 
@@ -32,6 +33,7 @@ func LoadConfig() *Config {
 	flag.StringVar(&cfg.S3Bucket, "s3-bucket", os.Getenv("S3_BUCKET_NAME"), "S3 bucket for data lake")
 	flag.StringVar(&cfg.Region, "aws-region", os.Getenv("AWS_REGION"), "AWS region")
 	flag.IntVar(&cfg.BatchSize, "batch-size", 1000, "Number of events per batch")
+	flag.IntVar(&cfg.Concurrency, "concurrency", 4, "Number of concurrent batch processors")
 	flag.StringVar(&flush, "flush-interval", "30s", "Flush interval duration (e.g. 30s)")
 
 	flag.Parse()
