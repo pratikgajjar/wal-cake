@@ -8,4 +8,4 @@ export AWS_SECRET_ACCESS_KEY="secret_key"
 export AWS_ENDPOINT="http://localhost:9000"
 export NAMESPACE="walcake"
 
-exec go run cmd/cake/main.go
+exec go run cmd/cake/main.go -batch-size 100 -concurrency 8

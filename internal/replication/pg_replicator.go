@@ -293,7 +293,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Data:      data,
 		}
 
-		log.Info().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Str("lsn", xLogPos.String()).Msg("insert event")
+		log.Debug().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Str("lsn", xLogPos.String()).Msg("insert event")
 		ch <- ev
 
 	case *pglogrepl.UpdateMessage:
@@ -324,7 +324,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Data:      data,
 		}
 
-		log.Info().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("data_fields", len(data)).Msg("update event")
+		log.Debug().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("data_fields", len(data)).Msg("update event")
 		ch <- ev
 
 	case *pglogrepl.DeleteMessage:
@@ -346,7 +346,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Data:      data,
 		}
 
-		log.Info().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("data_fields", len(data)).Msg("delete event")
+		log.Debug().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("data_fields", len(data)).Msg("delete event")
 		ch <- ev
 
 	case *pglogrepl.BeginMessage:

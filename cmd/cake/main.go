@@ -20,6 +20,13 @@ import (
 func main() {
 	cfg := config.LoadConfig()
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	logLevel := os.Getenv("LOG_LEVEL")
+	level, err := zerolog.ParseLevel(logLevel)
+	if err != nil || level == zerolog.NoLevel {
+		level = zerolog.InfoLevel
+	}
+	log.Info().Str("logLevel", level.String()).Msg("Setting log level")
+	log.Logger = log.Level(level)
 
 	// Create context with cancellation on signals
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
