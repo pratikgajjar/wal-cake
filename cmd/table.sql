@@ -60,4 +60,3 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER update_sample_table_modtime
 BEFORE UPDATE ON sample_table
 FOR EACH ROW EXECUTE FUNCTION update_modified_column();
-`
