@@ -59,6 +59,7 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 	}
 	// Upload to S3
 	s3Key := p.generateS3Key(events[len(events)-1].Timestamp)
+	time.Sleep(time.Second * 2)
 	if err := p.uploader.UploadBytes(ctx, s3Key, parquetBytes); err != nil {
 		log.Error().
 			Err(err).
@@ -73,9 +74,9 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 
 // generateS3Key generates an S3 key for the Parquet file
 func (p *ParquetBatchProcessor) generateS3Key(timestamp time.Time) string {
-	key := fmt.Sprintf("%s/%s/%d.%s.parquet", 
-		p.config.Namespace, 
-		timestamp.Format("20060102"), 
+	key := fmt.Sprintf("%s/%s/%d.%s.parquet",
+		p.config.Namespace,
+		timestamp.Format("20060102"),
 		timestamp.UnixMicro(),
 		p.transformer.GetCompressionCodec(),
 	)
