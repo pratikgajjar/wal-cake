@@ -276,10 +276,7 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 func (rb *RingBuffer) handleSegmentAck(segment Segment) {
 	var lastEvent *model.CDCEvent
 	rb.tracker.mu.Lock()
-	defer rb.tracker.mu.Unlock()
-
 	log.Debug().Any("segment", segment).Msg("Ack segment")
-
 	minSeq := segment.StartIdx
 	for seq := range rb.tracker.pending {
 		minSeq = min(minSeq, seq)
@@ -287,12 +284,15 @@ func (rb *RingBuffer) handleSegmentAck(segment Segment) {
 	if minSeq == segment.StartIdx {
 		idx := (segment.EndIdx - 1) % rb.size
 		lastEvent = rb.buffer[idx]
+		old := rb.readIdx.Swap(segment.StartIdx)
 		log.Debug().
 			Any("segment", segment).
-			Msg("First segment acknowledged, moving readIdx")
-		rb.readIdx.Swap(segment.StartIdx)
+			Int64("old", old).
+			Int64("new", segment.StartIdx).
+			Msg("update readIdx")
 	}
 	delete(rb.tracker.pending, segment.StartIdx)
+	rb.tracker.mu.Unlock()
 	// Send LSN acknowledgment for the last event in the segment
 	if lastEvent != nil {
 		select {
