@@ -248,7 +248,7 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 
 				// Calculate the new WAL position
 				xLogPos := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-				log.Debug().Str("xLogPos", xLogPos.String()).Msg("updated wal")
+				// log.Debug().Str("xLogPos", xLogPos.String()).Msg("updated wal")
 				logicalMsg, err := pglogrepl.Parse(xld.WALData)
 				if err != nil {
 					log.Error().Err(err).Msg("failed to parse logical replication message")

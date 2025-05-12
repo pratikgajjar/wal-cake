@@ -68,4 +68,4 @@ SELECT
     'system' AS created_by,
     'system' AS updated_by
     
-FROM generate_series(1, 10000) AS n;
+FROM generate_series(1, 5) AS n;

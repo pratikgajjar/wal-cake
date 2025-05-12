@@ -33,7 +33,7 @@ func main() {
 	defer cancel()
 
 	// Channel for CDC events from the replicator
-	eventsCh := make(chan *model.CDCEvent, cfg.BatchSize*2)
+	eventsCh := make(chan *model.CDCEvent, cfg.BatchSize*cfg.Concurrency)
 
 	// Channel for acknowledging LSNs after successful processing
 	ackCh := make(chan uint64, cfg.Concurrency*2)
