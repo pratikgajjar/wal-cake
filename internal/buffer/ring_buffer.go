@@ -26,11 +26,14 @@ type BatchProcessor interface {
 }
 
 // SegmentTracker tracks completed segments for efficient acknowledgment processing
+// and handles out-of-order segment completions
 type SegmentTracker struct {
-	mu      sync.Mutex
-	pending map[int64]*Segment
+	mu                sync.Mutex
+	pending           map[int64]*Segment // Map of StartIdx -> Segment
+	highestContiguous int64              // Highest position where all segments are completed
 }
 
+// Add adds a segment to the tracker
 func (st *SegmentTracker) Add(segment *Segment) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -41,6 +44,49 @@ func (st *SegmentTracker) Remove(seq int64) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	delete(st.pending, seq)
+}
+
+// SegmentCompleted marks a segment as completed and updates highestContiguous
+// Returns the new highest contiguous position
+func (st *SegmentTracker) SegmentCompleted(segment *Segment) int64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	// Remove the segment from pending
+	delete(st.pending, segment.StartIdx)
+
+	// Check if this segment advances our contiguous tracking
+	if segment.StartIdx == st.highestContiguous {
+		st.highestContiguous = segment.EndIdx
+
+		// Look for any segments that might extend this further
+		st.processContiguousSegments()
+	}
+
+	return st.highestContiguous
+}
+
+// processContiguousSegments processes segments that form a contiguous chain
+func (st *SegmentTracker) processContiguousSegments() {
+	// Keep processing segments that start exactly where our current tracking ends
+	for {
+		nextSegment, exists := st.pending[st.highestContiguous]
+		if !exists {
+			// No segment starts at the current highestContiguous position
+			break
+		}
+
+		// We found a segment that extends our contiguous range
+		delete(st.pending, st.highestContiguous)
+		st.highestContiguous = nextSegment.EndIdx
+	}
+}
+
+// HighestContiguous returns the current highest contiguous position
+func (st *SegmentTracker) HighestContiguous() int64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.highestContiguous
 }
 
 // RingBuffer implements a circular buffer optimized for batch processing
@@ -75,9 +121,9 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 		ticker:       time.NewTicker(tickInterval),
 		tickInterval: tickInterval,
 		processor:    processor,
-		ackSeg:       make(chan Segment, concurrency),
+		ackSeg:       make(chan Segment, concurrency), // Buffered to prevent deadlock during shutdown
 		ackCh:        ackCh,
-		tracker:      &SegmentTracker{pending: make(map[int64]*Segment)},
+		tracker:      &SegmentTracker{pending: make(map[int64]*Segment), highestContiguous: 0},
 	}
 	return rb
 }
@@ -251,7 +297,7 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 			}
 
 			if len(events) > 0 {
-				log.Info().
+				log.Debug().
 					Int("workerID", workerID).
 					Int("eventCount", len(events)).
 					Int64("startIdx", segment.StartIdx).
@@ -274,39 +320,37 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 
 // handleSegmentAck processes acknowledged segments and updates readIdx
 func (rb *RingBuffer) handleSegmentAck(segment Segment) {
-	var lastEvent *model.CDCEvent
-	rb.tracker.mu.Lock()
 	log.Debug().Any("segment", segment).Msg("Ack segment")
-	minSeq := segment.StartIdx
-	for seq := range rb.tracker.pending {
-		minSeq = min(minSeq, seq)
-	}
-	if minSeq == segment.StartIdx {
-		idx := (segment.EndIdx - 1) % rb.size
-		lastEvent = rb.buffer[idx]
-		old := rb.readIdx.Swap(segment.StartIdx)
+	newContiguous := rb.tracker.SegmentCompleted(&segment)
+	previousReadIdx := rb.readIdx.Load()
+	if newContiguous < previousReadIdx {
 		log.Debug().
-			Any("segment", segment).
-			Int64("old", old).
-			Int64("new", segment.StartIdx).
-			Msg("update readIdx")
+			Int64("segment.StartIdx", segment.StartIdx).
+			Int64("segment.EndIdx", segment.EndIdx).
+			Int64("contiguousPos", newContiguous).
+			Msg("Segment completed but did not advance contiguous position")
+		return
 	}
-	delete(rb.tracker.pending, segment.StartIdx)
-	rb.tracker.mu.Unlock()
-	// Send LSN acknowledgment for the last event in the segment
-	if lastEvent != nil {
-		select {
-		case rb.ackCh <- lastEvent.LSN:
-			log.Debug().Uint64("lsn", lastEvent.LSN).Msg("Acknowledged LSN after segment completion")
-		default:
-			log.Warn().Msg("Ack channel is full, could not send LSN after segment completion")
+	rb.readIdx.Store(newContiguous)
+	// Only send LSN acknowledgment if we actually advanced the contiguous position
+	if newContiguous > previousReadIdx && newContiguous > 0 {
+		idx := (newContiguous - 1) % rb.size
+		lastEvent := rb.buffer[idx]
+		if lastEvent != nil {
+			log.Debug().
+				Uint64("lsn", lastEvent.LSN).
+				Int64("newContiguous", newContiguous).
+				Int64("previousReadIdx", previousReadIdx).
+				Msg("Advancing contiguous position")
+
+			select {
+			case rb.ackCh <- lastEvent.LSN:
+				log.Debug().Uint64("lsn", lastEvent.LSN).Msg("Acknowledged LSN after contiguous advancement")
+			default:
+				log.Warn().Msg("Ack channel is full, could not send LSN after contiguous advancement")
+			}
 		}
 	}
-
-	log.Debug().
-		Int64("seq", segment.StartIdx).
-		Int("pendingSegments", len(rb.tracker.pending)).
-		Msg("Processed segment acknowledgment")
 }
 
 // Stop stops the ring buffer processing

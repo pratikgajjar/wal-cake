@@ -25,13 +25,27 @@ type s3Uploader struct {
 	bucket   string
 	region   string
 	endpoint string
+	client   *s3.Client
 }
 
 // NewS3Uploader creates a new S3Uploader
 func NewS3Uploader(cfg *config.Config) S3Uploader {
 	// Get endpoint from environment variable
 	endpoint := os.Getenv("AWS_ENDPOINT")
-	return &s3Uploader{bucket: cfg.S3Bucket, region: cfg.Region, endpoint: endpoint}
+	uploader := &s3Uploader{
+		bucket:   cfg.S3Bucket,
+		region:   cfg.Region,
+		endpoint: endpoint,
+	}
+
+	client, err := uploader.getS3Client(context.Background())
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to initialize S3 client")
+	} else {
+		uploader.client = client
+	}
+
+	return uploader
 }
 
 // getS3Client returns a configured S3 client
@@ -57,13 +71,8 @@ func (u *s3Uploader) getS3Client(ctx context.Context) (*s3.Client, error) {
 
 // UploadBytes uploads data directly from memory to the specified S3 key
 func (u *s3Uploader) UploadBytes(ctx context.Context, key string, data []byte) error {
-	client, err := u.getS3Client(ctx)
-	if err != nil {
-		return err
-	}
-
 	log.Info().Str("bucket", u.bucket).Str("key", key).Int("size", len(data)).Msg("init")
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := u.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(u.bucket),
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(data),

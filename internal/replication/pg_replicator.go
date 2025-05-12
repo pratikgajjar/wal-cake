@@ -361,7 +361,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Data:      map[string]interface{}{"commit_lsn": xLogPos.String()},
 		}
 
-		log.Debug().Str("commit_lsn", xLogPos.String()).Msg("commit transaction")
+		log.Debug().Str("lsn", xLogPos.String()).Msg("commit transaction")
 		ch <- ev
 
 	case *pglogrepl.TruncateMessage:
