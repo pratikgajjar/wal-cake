@@ -41,7 +41,7 @@ func (u *s3Uploader) getS3Client(ctx context.Context) (*s3.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
-	
+
 	// Create S3 client with the latest recommended configuration approach
 	s3Options := func(o *s3.Options) {
 		// Set base endpoint if specified (for MinIO)
@@ -51,11 +51,9 @@ func (u *s3Uploader) getS3Client(ctx context.Context) (*s3.Client, error) {
 			o.UsePathStyle = true // Required for MinIO compatibility
 		}
 	}
-	
+
 	return s3.NewFromConfig(awsCfg, s3Options), nil
 }
-
-
 
 // UploadBytes uploads data directly from memory to the specified S3 key
 func (u *s3Uploader) UploadBytes(ctx context.Context, key string, data []byte) error {
@@ -64,7 +62,7 @@ func (u *s3Uploader) UploadBytes(ctx context.Context, key string, data []byte) e
 		return err
 	}
 
-	log.Info().Str("bucket", u.bucket).Str("key", key).Int("size", len(data)).Msg("Uploading bytes directly to S3")
+	log.Info().Str("bucket", u.bucket).Str("key", key).Int("size", len(data)).Msg("init")
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(u.bucket),
 		Key:    aws.String(key),
@@ -72,8 +70,8 @@ func (u *s3Uploader) UploadBytes(ctx context.Context, key string, data []byte) e
 		ACL:    types.ObjectCannedACLPrivate,
 	})
 	if err != nil {
-		return fmt.Errorf("upload bytes to S3: %w", err)
+		return fmt.Errorf("uploaded bytes to S3: %w", err)
 	}
-	log.Info().Str("bucket", u.bucket).Str("key", key).Msg("Successfully uploaded bytes to S3")
+	log.Info().Str("bucket", u.bucket).Str("key", key).Msg("success")
 	return nil
 }
