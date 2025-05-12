@@ -46,7 +46,7 @@ func (st *SegmentTracker) Remove(seq int64) {
 // RingBuffer implements a circular buffer optimized for batch processing
 type RingBuffer struct {
 	buffer       []RingBufEvent
-	size         int
+	size         int64
 	writeIdx     atomic.Int64 // Current write position
 	readIdx      atomic.Int64 // Current read position
 	lastSegIdx   atomic.Int64 // Last segment end position
@@ -68,7 +68,7 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 	size := concurrency * batchSize
 	rb := &RingBuffer{
 		buffer:       make([]RingBufEvent, size),
-		size:         size,
+		size:         int64(size),
 		batchSize:    batchSize,
 		concurrency:  concurrency,
 		segments:     make(chan Segment, concurrency),
@@ -85,14 +85,11 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 // Add adds a new event to the ring buffer
 // Returns false if the buffer is full
 func (rb *RingBuffer) Add(event *model.CDCEvent) bool {
-	writePos := int(rb.writeIdx.Load()) % rb.size
-	readPos := int(rb.readIdx.Load()) % rb.size
-	// Check if buffer is full
-	nextWritePos := (writePos + 1) % rb.size
-	if nextWritePos == readPos {
+	w := rb.writeIdx.Load()
+	if w-rb.readIdx.Load() >= rb.size {
 		return false
 	}
-	rb.buffer[writePos] = event
+	rb.buffer[w%rb.size] = event
 	rb.writeIdx.Add(1)
 	return true
 }
@@ -241,7 +238,7 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 			events := make([]*model.CDCEvent, 0, rb.batchSize)
 			start := segment.StartIdx
 			for start < segment.EndIdx {
-				idx := start % int64(rb.size)
+				idx := start % rb.size
 				if rb.buffer[idx] != nil {
 					events = append(events, rb.buffer[idx])
 				}
@@ -256,11 +253,12 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 					Int64("endIdx", segment.EndIdx).
 					Msg("Processing segment")
 
-				for range 3 {
+				for i := range 3 {
 					err := rb.processor.Process(ctx, events)
 					if err == nil {
 						break
 					}
+					log.Error().Err(err).Int("retry", i+1).Msg("Error processing segment")
 					time.Sleep(time.Second * 2)
 				}
 			}
@@ -282,7 +280,8 @@ func (rb *RingBuffer) handleSegmentAck(segment Segment) {
 		minSeq = min(minSeq, seq)
 	}
 	if minSeq == segment.StartIdx {
-		lastEvent = rb.buffer[(segment.EndIdx)%int64(rb.size)-1]
+		idx := (segment.EndIdx - 1) % rb.size
+		lastEvent = rb.buffer[idx]
 		log.Debug().
 			Any("segment", segment).
 			Msg("First segment acknowledged, moving readIdx")
