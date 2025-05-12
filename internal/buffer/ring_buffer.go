@@ -75,7 +75,7 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 		ticker:       time.NewTicker(tickInterval),
 		tickInterval: tickInterval,
 		processor:    processor,
-		ackSeg:       make(chan Segment),
+		ackSeg:       make(chan Segment, concurrency),
 		ackCh:        ackCh,
 		tracker:      &SegmentTracker{pending: make(map[int64]*Segment)},
 	}
@@ -144,7 +144,12 @@ func (rb *RingBuffer) createTickerSegment() {
 	}
 
 	if lastSegPos < readPos {
-		panic("Last segment position is less than read position")
+		log.Error().
+			Int64("lastSegPos", lastSegPos).
+			Int64("readPos", readPos).
+			Msg("Last segment position is less than read position")
+		rb.lastSegIdx.Store(readPos)
+		return
 	}
 
 	// If there are no pending events, do nothing

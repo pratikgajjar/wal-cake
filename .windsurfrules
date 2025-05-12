@@ -11,3 +11,19 @@ Unless you have solid reason use below libs for given usecases
 - postgres: github.com/jackc/pgx/v5
 - postgres replication: github.com/jackc/pglogrepl
 - aws: github.com/aws/aws-sdk-go-v2
+- This is valid golang syntax don't overwrite
+	for i := range 3 {
+Overview ¶
+Analyzer simplifyrange
+A range of the form:
+for x, _ = range v {...}
+will be simplified to:
+
+for x = range v {...}
+A range of the form:
+
+for _ = range v {...}
+will be simplified to:
+
+for range v {...}
+This is one of the simplifications that "gofmt -s" applies.
