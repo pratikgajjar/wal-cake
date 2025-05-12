@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Operation represents the type of CDC operation
 type Operation string
@@ -20,4 +23,8 @@ type CDCEvent struct {
 	Data      map[string]interface{} `json:"data"`
 	Timestamp time.Time              `json:"timestamp"`
 	LSN       uint64                 `json:"lsn"`
+}
+
+func LSNStr(lsn uint64) string {
+	return fmt.Sprintf("%X/%X", uint32(lsn>>32), uint32(lsn))
 }

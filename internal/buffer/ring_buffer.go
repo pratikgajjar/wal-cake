@@ -20,10 +20,6 @@ type Segment struct {
 	EndIdx   int64 // End index in the ring buffer
 }
 
-func (s *Segment) Len() int {
-	return int(s.EndIdx-s.StartIdx) + 1
-}
-
 // BatchProcessor defines the interface for processing batches of events
 type BatchProcessor interface {
 	Process(ctx context.Context, events []*model.CDCEvent) error
@@ -128,7 +124,6 @@ func (rb *RingBuffer) checkForNewSegment() bool {
 		log.Debug().
 			Int64("startIdx", segment.StartIdx).
 			Int64("endIdx", segment.EndIdx).
-			Int("length", segment.Len()).
 			Msg("Created new segment")
 		return true
 	}
@@ -173,7 +168,6 @@ func (rb *RingBuffer) createTickerSegment() {
 	rb.tracker.Add(&segment)
 	rb.segments <- segment
 	log.Debug().
-		Int("count", segment.Len()).
 		Int64("startIdx", segment.StartIdx).
 		Int64("endIdx", segment.EndIdx).
 		Int("pendingSegMap", len(rb.tracker.pending)).

@@ -47,8 +47,8 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 		Int("eventCount", len(events)).
 		Str("firstTable", events[0].Table).
 		Str("firstOp", string(events[0].Operation)).
-		Any("start", events[0].Data["id"]).
-		Any("end", events[len(events)-1].Data["id"]).
+		Str("start", model.LSNStr(events[0].LSN)).
+		Str("end", model.LSNStr(events[len(events)-1].LSN)).
 		Msg("Processing batch")
 
 	parquetBytes, err := p.transformer.WriteToBuffer(events)
@@ -67,7 +67,6 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 	}
 	s3Key := p.generateS3Key(events[len(events)-1].Timestamp)
 	time.Sleep(time.Second * 2)
-	// TODO: Add retry
 	if err := p.uploader.UploadBytes(ctx, s3Key, parquetBytes); err != nil {
 		log.Error().
 			Err(err).
