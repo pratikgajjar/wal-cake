@@ -2,10 +2,10 @@ package buffer
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/alphadose/haxmap"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 
@@ -26,43 +26,6 @@ type BatchProcessor interface {
 	Process(ctx context.Context, events []*model.CDCEvent) error
 }
 
-// SegmentTracker tracks completed segments for efficient acknowledgment processing
-// and handles out-of-order segment completions
-type SegmentTracker struct {
-	mu      sync.Mutex
-	pending map[int64]*Segment // Map of StartIdx -> Segment
-}
-
-// Add adds a segment to the tracker
-func (st *SegmentTracker) Add(segment *Segment) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.pending[segment.StartIdx] = segment
-}
-
-func (st *SegmentTracker) HighestContiguous(segStartIdx, curReadIdx int64) int64 {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	s, ok := st.pending[segStartIdx]
-	if !ok {
-		return curReadIdx
-	}
-	s.done = true
-	if s.StartIdx == curReadIdx {
-		cur := s
-		for cur.done {
-			delete(st.pending, cur.StartIdx)
-			curReadIdx = cur.EndIdx
-			next, ok := st.pending[cur.EndIdx]
-			if !ok {
-				break
-			}
-			cur = next
-		}
-	}
-	return curReadIdx
-}
-
 // RingBuffer implements a circular buffer optimized for batch processing
 type RingBuffer struct {
 	buffer       []RingBufEvent
@@ -79,13 +42,14 @@ type RingBuffer struct {
 	processor    BatchProcessor
 	ackSeg       chan Segment
 	ackCh        chan<- uint64
-	tracker      *SegmentTracker // Tracks completed segments
+	tracker      *haxmap.Map[int64, *Segment] // Tracks completed segments
 }
 
 // NewRingBuffer creates a new ring buffer with the specified size
 func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, processor BatchProcessor, ackCh chan<- uint64) *RingBuffer {
 	// Size = concurrency * batchSize to ensure we have enough space
 	size := concurrency * batchSize
+
 	rb := &RingBuffer{
 		buffer:       make([]RingBufEvent, size),
 		size:         int64(size),
@@ -97,7 +61,7 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 		processor:    processor,
 		ackSeg:       make(chan Segment, concurrency), // Buffered to prevent deadlock during shutdown
 		ackCh:        ackCh,
-		tracker:      &SegmentTracker{pending: make(map[int64]*Segment)},
+		tracker:      haxmap.New[int64, *Segment](),
 	}
 	return rb
 }
@@ -112,6 +76,28 @@ func (rb *RingBuffer) Add(event *model.CDCEvent) bool {
 	rb.buffer[w%rb.size] = event
 	rb.writeIdx.Add(1)
 	return true
+}
+
+// findHighestContiguous finds the highest contiguous LSN after acknowledging a segment
+func (rb *RingBuffer) findHighestContiguous(segStartIdx, curReadIdx int64) int64 {
+	s, ok := rb.tracker.Get(segStartIdx)
+	if !ok {
+		return curReadIdx
+	}
+	s.done = true
+	if s.StartIdx == curReadIdx {
+		cur := s
+		for cur.done {
+			rb.tracker.Del(cur.StartIdx)
+			curReadIdx = cur.EndIdx
+			next, ok := rb.tracker.Get(cur.EndIdx)
+			if !ok {
+				break
+			}
+			cur = next
+		}
+	}
+	return curReadIdx
 }
 
 // checkForNewSegment checks if there are enough events to create a new segment
@@ -136,7 +122,7 @@ func (rb *RingBuffer) checkForNewSegment() bool {
 			EndIdx:   writePos,
 		}
 		rb.lastSegIdx.Store(writePos)
-		rb.tracker.Add(&segment)
+		rb.tracker.Set(segment.StartIdx, &segment)
 		rb.segments <- segment
 		log.Debug().
 			Int64("startIdx", segment.StartIdx).
@@ -185,14 +171,13 @@ func (rb *RingBuffer) createTickerSegment() {
 
 	// Update last segment position
 	rb.lastSegIdx.Store(writePos)
-
 	// Send segment for processing
-	rb.tracker.Add(&segment)
+	rb.tracker.Set(segment.StartIdx, &segment)
 	rb.segments <- segment
 	log.Debug().
 		Int64("startIdx", segment.StartIdx).
 		Int64("endIdx", segment.EndIdx).
-		Int("pendingSegMap", len(rb.tracker.pending)).
+		Int("pendingSegMap", int(rb.tracker.Len())).
 		Msg("Created ticker-based segment")
 }
 
@@ -298,7 +283,7 @@ func (rb *RingBuffer) worker(ctx context.Context, workerID int) error {
 // handleSegmentAck processes acknowledged segments and updates readIdx
 func (rb *RingBuffer) handleSegmentAck(segment Segment) {
 	previousReadIdx := rb.readIdx.Load()
-	highContiguous := rb.tracker.HighestContiguous(segment.StartIdx, previousReadIdx)
+	highContiguous := rb.findHighestContiguous(segment.StartIdx, previousReadIdx)
 	log.Debug().
 		Any("segment", segment).
 		Int64("prevRead", previousReadIdx).
