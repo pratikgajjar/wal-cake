@@ -82,7 +82,7 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 func (p *ParquetBatchProcessor) generateS3Key(timestamp time.Time) string {
 	key := fmt.Sprintf("%s/%s/%d.%s.parquet",
 		p.config.Namespace,
-		timestamp.Format("20060102"),
+		timestamp.Format("2006/01/02"),
 		timestamp.UnixMicro(),
 		p.transformer.GetCompressionCodec(),
 	)
