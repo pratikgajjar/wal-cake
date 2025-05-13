@@ -60,7 +60,6 @@ func (u *s3Uploader) getS3Client(ctx context.Context) (*s3.Client, error) {
 	s3Options := func(o *s3.Options) {
 		// Set base endpoint if specified (for MinIO)
 		if u.endpoint != "" {
-			log.Debug().Str("endpoint", u.endpoint).Msg("Using custom S3 endpoint")
 			o.BaseEndpoint = aws.String(u.endpoint)
 			o.UsePathStyle = true // Required for MinIO compatibility
 		}

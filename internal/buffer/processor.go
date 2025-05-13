@@ -66,7 +66,6 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 		return nil
 	}
 	s3Key := p.generateS3Key(events[len(events)-1].Timestamp)
-	time.Sleep(time.Second * 2)
 	if err := p.uploader.UploadBytes(ctx, s3Key, parquetBytes); err != nil {
 		log.Error().
 			Err(err).
