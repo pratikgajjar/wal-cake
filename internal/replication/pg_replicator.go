@@ -290,10 +290,10 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Operation: model.InsertOp,
 			Timestamp: time.Now(),
 			LSN:       uint64(xLogPos),
-			Data:      data,
+			After:     data,
 		}
 
-		log.Debug().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("data_fields", len(data)).Str("lsn", xLogPos.String()).Msg("insert event")
+		log.Debug().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("after_fields", len(data)).Str("lsn", xLogPos.String()).Msg("insert event")
 		ch <- ev
 
 	case *pglogrepl.UpdateMessage:
@@ -305,15 +305,12 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 		}
 
 		// Extract the new data from the tuple
-		data := extractTupleData(msg.NewTuple, relInfo.columns)
+		newData := extractTupleData(msg.NewTuple, relInfo.columns)
 
-		// Also extract old data for reference if available
-		oldData := extractTupleData(msg.OldTuple, relInfo.columns)
-		if len(oldData) > 0 {
-			// Add old values to the data with a prefix
-			for k, v := range oldData {
-				data["old_"+k] = v
-			}
+		// Extract old data if available (OldTupleType can be 'K' for key or 'O' for old values)
+		var oldData map[string]any
+		if msg.OldTupleType == 'K' || msg.OldTupleType == 'O' {
+			oldData = extractTupleData(msg.OldTuple, relInfo.columns)
 		}
 
 		ev := &model.CDCEvent{
@@ -321,10 +318,11 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Operation: model.UpdateOp,
 			Timestamp: time.Now(),
 			LSN:       uint64(xLogPos),
-			Data:      data,
+			Before:    oldData,
+			After:     newData,
 		}
 
-		log.Debug().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("data_fields", len(data)).Msg("update event")
+		log.Debug().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("before_fields", len(oldData)).Int("after_fields", len(newData)).Msg("update event")
 		ch <- ev
 
 	case *pglogrepl.DeleteMessage:
@@ -335,18 +333,21 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
 		}
 
-		// For deletes, extract key data from the old tuple
-		data := extractTupleData(msg.OldTuple, relInfo.columns)
+		// For deletes, extract key data from the old tuple if available
+		var data map[string]any
+		if msg.OldTupleType == 'K' || msg.OldTupleType == 'O' {
+			data = extractTupleData(msg.OldTuple, relInfo.columns)
+		}
 
 		ev := &model.CDCEvent{
 			Table:     relInfo.name,
 			Operation: model.DeleteOp,
 			Timestamp: time.Now(),
 			LSN:       uint64(xLogPos),
-			Data:      data,
+			Before:    data,
 		}
 
-		log.Debug().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("data_fields", len(data)).Msg("delete event")
+		log.Debug().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("before_fields", len(data)).Msg("delete event")
 		ch <- ev
 
 	case *pglogrepl.BeginMessage:
@@ -358,7 +359,6 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Operation: model.CommitOp,
 			Timestamp: time.Now(),
 			LSN:       uint64(xLogPos),
-			Data:      map[string]interface{}{"commit_lsn": xLogPos.String()},
 		}
 
 		log.Debug().Str("lsn", xLogPos.String()).Msg("commit transaction")

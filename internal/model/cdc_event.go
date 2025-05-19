@@ -18,11 +18,12 @@ const (
 
 // CDCEvent represents a change data capture event
 type CDCEvent struct {
-	Table     string                 `json:"table"`
-	Operation Operation              `json:"op"`
-	Data      map[string]interface{} `json:"data"`
-	Timestamp time.Time              `json:"timestamp"`
-	LSN       uint64                 `json:"lsn"`
+	Table     string         `json:"table"`
+	Operation Operation      `json:"op"`
+	Before    map[string]any `json:"before,omitempty"`
+	After     map[string]any `json:"after,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
+	LSN       uint64         `json:"lsn"`
 }
 
 func LSNStr(lsn uint64) string {

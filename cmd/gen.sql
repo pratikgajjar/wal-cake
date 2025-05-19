@@ -1,6 +1,6 @@
 -- Data generation script for postgres_data_types table
 WITH config AS (
-    SELECT 100 AS row_count  -- change to desired N
+    SELECT 10 AS row_count  -- change to desired N
 ), series AS (
     SELECT generate_series(1, (SELECT row_count FROM config)) AS i
 )
@@ -102,3 +102,9 @@ SELECT
     ('0/'||i::text)::pg_lsn,
     (i + 100)::text::xid8
 FROM series;
+
+UPDATE postgres_data_types 
+    SET type_name = 'updated_' || type_name 
+WHERE id > (SELECT id from postgres_data_types order by id limit 1 offset 10);
+
+DELETE FROM postgres_data_types WHERE id > (SELECT id from postgres_data_types order by id limit 1 offset 10);

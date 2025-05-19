@@ -97,13 +97,18 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 		log.Fatal().Err(err).Msg("create lsn schema node")
 	}
 
-	dataNode, err := schema.NewPrimitiveNode("data_json", parquet.Repetitions.Required, parquet.Types.ByteArray, -1, -1)
+	beforeNode, err := schema.NewPrimitiveNode("before", parquet.Repetitions.Optional, parquet.Types.ByteArray, -1, -1)
 	if err != nil {
-		log.Fatal().Err(err).Msg("create data_json schema node")
+		log.Fatal().Err(err).Msg("create before schema node")
+	}
+
+	afterNode, err := schema.NewPrimitiveNode("after", parquet.Repetitions.Optional, parquet.Types.ByteArray, -1, -1)
+	if err != nil {
+		log.Fatal().Err(err).Msg("create after schema node")
 	}
 
 	// Create schema
-	fields := []schema.Node{tableNode, opNode, tsNode, lsnNode, dataNode}
+	fields := []schema.Node{tableNode, opNode, tsNode, lsnNode, beforeNode, afterNode}
 	root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, fields, -1)
 	if err != nil {
 		log.Fatal().Err(err).Msg("create schema")
@@ -116,9 +121,11 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io.Writer) error {
 	// First count how many events will pass the filter
 	validCount := 0
-	for _, ev := range events {
+	skip := map[int]bool{}
+	for i, ev := range events {
 		if w.shouldIncludeEvent(ev) {
 			validCount++
+			skip[i] = true
 		}
 	}
 
@@ -132,102 +139,138 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 		log.Warn().Msg("no events to write after filtering")
 		return nil
 	}
+
 	// Create a writer that can tell its position
 	wt := &writerTell{w: writer}
+
 	// Create parquet writer with schema
 	schema := w.createSchema()
+
 	// Create parquet file writer
 	fileWriter := file.NewParquetWriter(wt, schema.Root(), file.WithWriterProps(w.props))
-	// Create row group with a reasonable size
-	rg := fileWriter.AppendRowGroup()
-	// Prepare column data arrays once with the exact size needed
-	tableData := make([]parquet.ByteArray, validCount)
-	opData := make([]parquet.ByteArray, validCount)
-	tsData := make([]int64, validCount)
-	lsnData := make([]int64, validCount)
-	dataJsonValues := make([]parquet.ByteArray, validCount)
 
-	// Fill column data arrays in a single pass
-	index := 0
-	for _, ev := range events {
-		if !w.shouldIncludeEvent(ev) {
+	// We'll write events in separate row groups based on operation type
+	// This ensures that operations of the same type are perfectly aligned
+
+	// Process and write each event individually to avoid alignment issues
+	row := 0
+	for i, ev := range events {
+		if skip[i] {
 			continue
 		}
-		// Table column
-		tableData[index] = []byte(ev.Table)
-		// Operation column
-		opData[index] = []byte(ev.Operation)
-		// Timestamp column
-		tsData[index] = ev.Timestamp.UnixNano() / int64(time.Millisecond)
-		// LSN column
-		lsnData[index] = int64(ev.LSN)
-		// Data JSON column
-		jsonData, err := json.Marshal(ev.Data)
-		if err != nil {
-			return fmt.Errorf("marshal data to JSON: %w", err)
+		// Create a new row group for each event
+		rg := fileWriter.AppendRowGroup()
+
+		// Prepare columnar data for a single row
+		tableData := []parquet.ByteArray{[]byte(ev.Table)}
+		opData := []parquet.ByteArray{[]byte(ev.Operation)}
+		tsData := []int64{ev.Timestamp.UnixNano() / int64(time.Millisecond)}
+		lsnData := []int64{int64(ev.LSN)}
+
+		// Prepare before and after data
+		var beforeJsonArr []parquet.ByteArray
+		var defBefore []int16
+		var afterJsonArr []parquet.ByteArray
+		var defAfter []int16
+
+		// Process before data
+		if ev.Before != nil {
+			beforeJson, err := json.Marshal(ev.Before)
+			if err != nil {
+				return fmt.Errorf("marshal CDC before data to JSON: %w", err)
+			}
+			beforeJsonArr = []parquet.ByteArray{beforeJson}
+			defBefore = []int16{1}
+		} else {
+			beforeJsonArr = []parquet.ByteArray{nil}
+			defBefore = []int16{0}
 		}
-		dataJsonValues[index] = jsonData
-		index++
-	}
 
-	// Write table column
-	tableWriter, err := rg.NextColumn()
-	if err != nil {
-		return fmt.Errorf("next column: %w", err)
-	}
-	byteArrayWriter := tableWriter.(*file.ByteArrayColumnChunkWriter)
-	_, err = byteArrayWriter.WriteBatch(tableData, nil, nil)
-	if err != nil {
-		return fmt.Errorf("write table column: %w", err)
-	}
+		// Process after data
+		if ev.After != nil {
+			afterJson, err := json.Marshal(ev.After)
+			if err != nil {
+				return fmt.Errorf("marshal CDC after data to JSON: %w", err)
+			}
+			afterJsonArr = []parquet.ByteArray{afterJson}
+			defAfter = []int16{1}
+		} else {
+			afterJsonArr = []parquet.ByteArray{nil}
+			defAfter = []int16{0}
+		}
 
-	// Write operation column
-	opWriter, err := rg.NextColumn()
-	if err != nil {
-		return fmt.Errorf("next column: %w", err)
-	}
-	opByteArrayWriter := opWriter.(*file.ByteArrayColumnChunkWriter)
-	_, err = opByteArrayWriter.WriteBatch(opData, nil, nil)
-	if err != nil {
-		return fmt.Errorf("write operation column: %w", err)
-	}
+		// Write table column
+		tableWriter, err := rg.NextColumn()
+		if err != nil {
+			return fmt.Errorf("next column table: %w", err)
+		}
+		byteArrayWriter := tableWriter.(*file.ByteArrayColumnChunkWriter)
+		_, err = byteArrayWriter.WriteBatch(tableData, nil, nil)
+		if err != nil {
+			return fmt.Errorf("write table column: %w", err)
+		}
 
-	// Write timestamp column
-	tsWriter, err := rg.NextColumn()
-	if err != nil {
-		return fmt.Errorf("next column: %w", err)
-	}
-	tsInt64Writer := tsWriter.(*file.Int64ColumnChunkWriter)
-	_, err = tsInt64Writer.WriteBatch(tsData, nil, nil)
-	if err != nil {
-		return fmt.Errorf("write timestamp column: %w", err)
-	}
+		// Write operation column
+		opWriter, err := rg.NextColumn()
+		if err != nil {
+			return fmt.Errorf("next column op: %w", err)
+		}
+		opByteArrayWriter := opWriter.(*file.ByteArrayColumnChunkWriter)
+		_, err = opByteArrayWriter.WriteBatch(opData, nil, nil)
+		if err != nil {
+			return fmt.Errorf("write operation column: %w", err)
+		}
 
-	// Write LSN column
-	lsnWriter, err := rg.NextColumn()
-	if err != nil {
-		return fmt.Errorf("next column: %w", err)
-	}
-	lsnInt64Writer := lsnWriter.(*file.Int64ColumnChunkWriter)
-	_, err = lsnInt64Writer.WriteBatch(lsnData, nil, nil)
-	if err != nil {
-		return fmt.Errorf("write lsn column: %w", err)
-	}
+		// Write timestamp column
+		tsWriter, err := rg.NextColumn()
+		if err != nil {
+			return fmt.Errorf("next column timestamp: %w", err)
+		}
+		tsInt64Writer := tsWriter.(*file.Int64ColumnChunkWriter)
+		_, err = tsInt64Writer.WriteBatch(tsData, nil, nil)
+		if err != nil {
+			return fmt.Errorf("write timestamp column: %w", err)
+		}
 
-	// Write data JSON column
-	dataWriter, err := rg.NextColumn()
-	if err != nil {
-		return fmt.Errorf("next column: %w", err)
-	}
-	dataByteArrayWriter := dataWriter.(*file.ByteArrayColumnChunkWriter)
-	_, err = dataByteArrayWriter.WriteBatch(dataJsonValues, nil, nil)
-	if err != nil {
-		return fmt.Errorf("write data column: %w", err)
-	}
+		// Write LSN column
+		lsnWriter, err := rg.NextColumn()
+		if err != nil {
+			return fmt.Errorf("next column lsn: %w", err)
+		}
+		lsnInt64Writer := lsnWriter.(*file.Int64ColumnChunkWriter)
+		_, err = lsnInt64Writer.WriteBatch(lsnData, nil, nil)
+		if err != nil {
+			return fmt.Errorf("write lsn column: %w", err)
+		}
 
-	// Close the row group
-	if err := rg.Close(); err != nil {
-		return fmt.Errorf("close row group: %w", err)
+		// Write before column
+		beforeWriter, err := rg.NextColumn()
+		if err != nil {
+			return fmt.Errorf("next column before: %w", err)
+		}
+		beforeByteArrayWriter := beforeWriter.(*file.ByteArrayColumnChunkWriter)
+		_, err = beforeByteArrayWriter.WriteBatch(beforeJsonArr, defBefore, nil)
+		if err != nil {
+			return fmt.Errorf("write before column: %w", err)
+		}
+
+		// Write after column
+		afterWriter, err := rg.NextColumn()
+		if err != nil {
+			return fmt.Errorf("next column after: %w", err)
+		}
+		afterByteArrayWriter := afterWriter.(*file.ByteArrayColumnChunkWriter)
+		_, err = afterByteArrayWriter.WriteBatch(afterJsonArr, defAfter, nil)
+		if err != nil {
+			return fmt.Errorf("write after column: %w", err)
+		}
+
+		// Close the row group for this event
+		if err := rg.Close(); err != nil {
+			return fmt.Errorf("close row group: %w", err)
+		}
+
+		row++
 	}
 
 	// Close the file writer

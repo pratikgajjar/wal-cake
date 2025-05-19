@@ -3,6 +3,7 @@ module git.famapp.in/fampay-inc/wal-cake
 go 1.24.1
 
 require (
+	github.com/alphadose/haxmap v1.4.1
 	github.com/apache/arrow-go/v18 v18.2.0
 	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/aws/aws-sdk-go-v2/config v1.29.14
@@ -14,7 +15,6 @@ require (
 )
 
 require (
-	github.com/alphadose/haxmap v1.4.1 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/apache/thrift v0.21.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.10 // indirect

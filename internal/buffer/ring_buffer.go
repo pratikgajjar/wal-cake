@@ -217,6 +217,7 @@ func (rb *RingBuffer) Start(ctx context.Context, eventsCh <-chan *model.CDCEvent
 				rb.createTickerSegment()
 			case event := <-eventsCh:
 				// Try to add the event to the buffer
+				log.Debug().Any("event", event).Msg("RX:eventsCh")
 				for !rb.Add(event) {
 					select {
 					case <-ctx.Done():
