@@ -17,6 +17,11 @@ import (
 	"git.famapp.in/fampay-inc/wal-cake/internal/model"
 )
 
+const (
+	KEY = 'K'
+	ALL = 'O'
+)
+
 // PGReplicator interface defines methods for PostgreSQL logical replication
 type PGReplicator interface {
 	// Start begins replication and sends CDC events to the provided channel
@@ -309,7 +314,9 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 
 		// Extract old data if available (OldTupleType can be 'K' for key or 'O' for old values)
 		var oldData map[string]any
-		if msg.OldTupleType == 'K' || msg.OldTupleType == 'O' {
+		if msg.OldTupleType == KEY {
+			oldData = extractKeyOnlyTupleData(msg.OldTuple, relInfo.columns)
+		} else if msg.OldTupleType == ALL {
 			oldData = extractTupleData(msg.OldTuple, relInfo.columns)
 		}
 
@@ -333,9 +340,11 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			relInfo = relationInfo{name: fmt.Sprintf("unknown-%d", msg.RelationID)}
 		}
 
-		// For deletes, extract key data from the old tuple if available
+		// For deletes, extract data from the old tuple if available
 		var data map[string]any
-		if msg.OldTupleType == 'K' || msg.OldTupleType == 'O' {
+		if msg.OldTupleType == KEY {
+			data = extractKeyOnlyTupleData(msg.OldTuple, relInfo.columns)
+		} else if msg.OldTupleType == ALL {
 			data = extractTupleData(msg.OldTuple, relInfo.columns)
 		}
 
