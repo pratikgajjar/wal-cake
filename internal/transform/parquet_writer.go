@@ -167,7 +167,7 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 		// Operation column
 		opData[index] = []byte(ev.Operation)
 		// Timestamp column
-		tsData[index] = ev.Timestamp.UnixNano()
+		tsData[index] = ev.Timestamp.UnixMicro()
 		// LSN column
 		lsnData[index] = int64(ev.LSN)
 
