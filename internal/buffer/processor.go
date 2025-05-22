@@ -51,6 +51,26 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 		Str("end", model.LSNStr(events[len(events)-1].LSN)).
 		Msg("Processing batch")
 
+	cur := events[0].Timestamp.Format("2006/01/02")
+	left, right := 0, 0
+	for right, e := range events {
+		if e.Timestamp.Format("2006/01/02") != cur {
+			if err := p.Upload(ctx, events[left:right]); err != nil {
+				return err
+			}
+			cur = e.Timestamp.Format("2006/01/02")
+			left = right
+		}
+	}
+
+	return p.Upload(ctx, events[left:right+1])
+}
+
+func (p *ParquetBatchProcessor) Upload(ctx context.Context, events []*model.CDCEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+
 	parquetBytes, err := p.transformer.WriteToBuffer(events)
 	if err != nil {
 		log.Error().
@@ -74,7 +94,6 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 			Msg("Failed to upload Parquet file to S3")
 		return err
 	}
-
 	return nil
 }
 
