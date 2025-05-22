@@ -51,10 +51,15 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 		Str("end", model.LSNStr(events[len(events)-1].LSN)).
 		Msg("Processing batch")
 
-	curDate := events[0].Timestamp.Truncate(24 * time.Hour)
+	// Events are from the same day
+	if events[0].Date().Equal(events[len(events)-1].Date()) {
+		return p.Upload(ctx, events)
+	}
+
+	curDate := events[0].Date()
 	left, right := 0, 0
 	for right, e := range events {
-		nextDate := e.Timestamp.Truncate(24 * time.Hour)
+		nextDate := e.Date()
 		if !nextDate.Equal(curDate) {
 			if err := p.Upload(ctx, events[left:right]); err != nil {
 				return err

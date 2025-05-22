@@ -26,6 +26,10 @@ type CDCEvent struct {
 	LSN       uint64         `json:"lsn"`
 }
 
+func (c *CDCEvent) Date() time.Time {
+	return c.Timestamp.Truncate(24 * time.Hour)
+}
+
 func LSNStr(lsn uint64) string {
 	return fmt.Sprintf("%X/%X", uint32(lsn>>32), uint32(lsn))
 }
