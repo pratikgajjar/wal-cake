@@ -54,11 +54,12 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 	cur := events[0].Timestamp.Format("2006/01/02")
 	left, right := 0, 0
 	for right, e := range events {
-		if e.Timestamp.Format("2006/01/02") != cur {
+		next := e.Timestamp.Format("2006/01/02")
+		if next != cur {
 			if err := p.Upload(ctx, events[left:right]); err != nil {
 				return err
 			}
-			cur = e.Timestamp.Format("2006/01/02")
+			cur = next
 			left = right
 		}
 	}
