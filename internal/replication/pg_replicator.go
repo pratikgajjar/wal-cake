@@ -40,14 +40,20 @@ type pgReplicator struct {
 	queryConn    *pgx.Conn
 	lastAckedLSN pglogrepl.LSN
 	relations    map[uint32]relationInfo
+	decoder      *TupleDecoder
 }
 
 // NewPGReplicator creates a new PostgreSQL replicator
 func NewPGReplicator(cfg *config.Config) PGReplicator {
 	relations := make(map[uint32]relationInfo)
+	defaultDecoder := NewTupleDecoder()
 	return &pgReplicator{
-		cfg:       cfg,
-		relations: relations,
+		cfg:          cfg,
+		repConn:      nil,
+		queryConn:    nil,
+		lastAckedLSN: 0,
+		relations:    relations,
+		decoder:      defaultDecoder,
 	}
 }
 
@@ -288,7 +294,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 		}
 
 		// Create data map and extract values from tuple data
-		data := extractTupleData(msg.Tuple, relInfo.columns)
+		data := r.decoder.ExtractTupleData(msg.Tuple, relInfo.columns)
 
 		ev := &model.CDCEvent{
 			Table:     relInfo.name,
@@ -310,14 +316,14 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 		}
 
 		// Extract the new data from the tuple
-		newData := extractTupleData(msg.NewTuple, relInfo.columns)
+		newData := r.decoder.ExtractTupleData(msg.NewTuple, relInfo.columns)
 
 		// Extract old data if available (OldTupleType can be 'K' for key or 'O' for old values)
 		var oldData map[string]any
 		if msg.OldTupleType == KEY {
-			oldData = extractKeyOnlyTupleData(msg.OldTuple, relInfo.columns)
+			oldData = r.decoder.ExtractKeyOnlyTupleData(msg.OldTuple, relInfo.columns)
 		} else if msg.OldTupleType == ALL {
-			oldData = extractTupleData(msg.OldTuple, relInfo.columns)
+			oldData = r.decoder.ExtractTupleData(msg.OldTuple, relInfo.columns)
 		}
 
 		ev := &model.CDCEvent{
@@ -343,9 +349,9 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 		// For deletes, extract data from the old tuple if available
 		var data map[string]any
 		if msg.OldTupleType == KEY {
-			data = extractKeyOnlyTupleData(msg.OldTuple, relInfo.columns)
+			data = r.decoder.ExtractKeyOnlyTupleData(msg.OldTuple, relInfo.columns)
 		} else if msg.OldTupleType == ALL {
-			data = extractTupleData(msg.OldTuple, relInfo.columns)
+			data = r.decoder.ExtractTupleData(msg.OldTuple, relInfo.columns)
 		}
 
 		ev := &model.CDCEvent{

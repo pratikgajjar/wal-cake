@@ -9,13 +9,13 @@ import (
 
 // PostgreSQL Type OIDs for common numeric types
 const (
-	Int2OID   uint32 = 21    // smallint
-	Int4OID   uint32 = 23    // integer
-	Int8OID   uint32 = 20    // bigint
-	Float4OID uint32 = 700   // real/float4
-	Float8OID uint32 = 701   // double precision/float8
+	Int2OID    uint32 = 21   // smallint
+	Int4OID    uint32 = 23   // integer
+	Int8OID    uint32 = 20   // bigint
+	Float4OID  uint32 = 700  // real/float4
+	Float8OID  uint32 = 701  // double precision/float8
 	NumericOID uint32 = 1700 // numeric/decimal
-	BoolOID   uint32 = 16    // boolean
+	BoolOID    uint32 = 16   // boolean
 )
 
 // TypeHandler defines an interface for handling column values based on PostgreSQL types
@@ -181,17 +181,4 @@ func (d *TupleDecoder) extractTuple(tuple *pglogrepl.TupleData, columns []*pglog
 	}
 
 	return data
-}
-
-// For backwards compatibility with existing code
-var defaultDecoder = NewTupleDecoder()
-
-// extractTupleData is kept for backwards compatibility
-func extractTupleData(tuple *pglogrepl.TupleData, columns []*pglogrepl.RelationMessageColumn) map[string]any {
-	return defaultDecoder.ExtractTupleData(tuple, columns)
-}
-
-// extractKeyOnlyTupleData is kept for backwards compatibility
-func extractKeyOnlyTupleData(tuple *pglogrepl.TupleData, columns []*pglogrepl.RelationMessageColumn) map[string]any {
-	return defaultDecoder.ExtractKeyOnlyTupleData(tuple, columns)
 }
