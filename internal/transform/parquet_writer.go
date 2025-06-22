@@ -76,32 +76,73 @@ func (w *parquetWriter) AddFilter(filter EventFilter) {
 // createSchema creates the Parquet schema for CDC events
 func (w *parquetWriter) createSchema() *schema.Schema {
 	// Create schema nodes for each column
-	tableNode, err := schema.NewPrimitiveNodeLogical("table", parquet.Repetitions.Required, schema.StringLogicalType{}, parquet.Types.ByteArray, -1, -1)
+	tableNode, err := schema.NewPrimitiveNodeLogical(
+		"table",
+		parquet.Repetitions.Required,
+		schema.StringLogicalType{},
+		parquet.Types.ByteArray,
+		-1,
+		-1,
+	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("create table schema node")
 	}
 
-	opNode, err := schema.NewPrimitiveNodeLogical("operation", parquet.Repetitions.Required, schema.StringLogicalType{}, parquet.Types.ByteArray, -1, -1)
+	opNode, err := schema.NewPrimitiveNodeLogical(
+		"operation",
+		parquet.Repetitions.Required,
+		schema.StringLogicalType{},
+		parquet.Types.ByteArray,
+		-1,
+		-1,
+	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("create operation schema node")
 	}
 
-	tsNode, err := schema.NewPrimitiveNodeLogical("timestamp", parquet.Repetitions.Required, schema.NewTimestampLogicalType(true, schema.TimeUnitMicros), parquet.Types.Int64, -1, -1)
+	tsNode, err := schema.NewPrimitiveNodeLogical(
+		"timestamp",
+		parquet.Repetitions.Required,
+		schema.NewTimestampLogicalType(true, schema.TimeUnitMicros),
+		parquet.Types.Int64,
+		-1,
+		-1,
+	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("create timestamp schema node")
 	}
 
-	lsnNode, err := schema.NewPrimitiveNode("lsn", parquet.Repetitions.Required, parquet.Types.Int64, -1, -1)
+	lsnNode, err := schema.NewPrimitiveNode(
+		"lsn",
+		parquet.Repetitions.Required,
+		parquet.Types.Int64,
+		-1,
+		-1,
+	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("create lsn schema node")
 	}
 
-	beforeNode, err := schema.NewPrimitiveNodeLogical("before", parquet.Repetitions.Optional, schema.JSONLogicalType{}, parquet.Types.ByteArray, -1, -1)
+	beforeNode, err := schema.NewPrimitiveNodeLogical(
+		"before",
+		parquet.Repetitions.Optional,
+		schema.JSONLogicalType{},
+		parquet.Types.ByteArray,
+		-1,
+		-1,
+	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("create before schema node")
 	}
 
-	afterNode, err := schema.NewPrimitiveNodeLogical("after", parquet.Repetitions.Optional, schema.JSONLogicalType{}, parquet.Types.ByteArray, -1, -1)
+	afterNode, err := schema.NewPrimitiveNodeLogical(
+		"after",
+		parquet.Repetitions.Optional,
+		schema.JSONLogicalType{},
+		parquet.Types.ByteArray,
+		-1,
+		-1,
+	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("create after schema node")
 	}
