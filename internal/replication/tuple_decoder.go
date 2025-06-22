@@ -5,17 +5,7 @@ import (
 	"strconv"
 
 	"github.com/jackc/pglogrepl"
-)
-
-// PostgreSQL Type OIDs for common numeric types
-const (
-	Int2OID    uint32 = 21   // smallint
-	Int4OID    uint32 = 23   // integer
-	Int8OID    uint32 = 20   // bigint
-	Float4OID  uint32 = 700  // real/float4
-	Float8OID  uint32 = 701  // double precision/float8
-	NumericOID uint32 = 1700 // numeric/decimal
-	BoolOID    uint32 = 16   // boolean
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // TypeHandler defines an interface for handling column values based on PostgreSQL types
@@ -36,13 +26,13 @@ func NewDataTypeRegistry() *DataTypeRegistry {
 	}
 
 	// Register numeric type handlers
-	registry.RegisterHandler(Int2OID, &IntegerHandler{})
-	registry.RegisterHandler(Int4OID, &IntegerHandler{})
-	registry.RegisterHandler(Int8OID, &IntegerHandler{})
-	registry.RegisterHandler(Float4OID, &FloatHandler{})
-	registry.RegisterHandler(Float8OID, &FloatHandler{})
-	registry.RegisterHandler(NumericOID, &NumericHandler{})
-	registry.RegisterHandler(BoolOID, &BooleanHandler{})
+	registry.RegisterHandler(pgtype.Int2OID, &IntegerHandler{})
+	registry.RegisterHandler(pgtype.Int4OID, &IntegerHandler{})
+	registry.RegisterHandler(pgtype.Int8OID, &IntegerHandler{})
+	registry.RegisterHandler(pgtype.Float4OID, &FloatHandler{})
+	registry.RegisterHandler(pgtype.Float8OID, &FloatHandler{})
+	registry.RegisterHandler(pgtype.NumericOID, &NumericHandler{})
+	registry.RegisterHandler(pgtype.BoolOID, &BooleanHandler{})
 
 	return registry
 }
