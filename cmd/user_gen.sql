@@ -13,7 +13,7 @@ WITH user_data AS (
              ELSE (CURRENT_TIMESTAMP - (n || ' days')::INTERVAL)
         END AS last_login_at,
         (CURRENT_TIMESTAMP - ((n * 2) || ' days')::INTERVAL) AS created_at
-    FROM generate_series(1, 10) AS n
+    FROM generate_series(1, 499) AS n
 )
 INSERT INTO users (
     username,
@@ -41,6 +41,6 @@ SELECT
 FROM user_data
 ON CONFLICT (email) DO NOTHING;
 
-UPDATE users SET last_login_at = now() - INTERVAL '9 days';
+-- UPDATE users SET last_login_at = now() - INTERVAL '9 days';
 
 DELETE FROM users WHERE id > 0;

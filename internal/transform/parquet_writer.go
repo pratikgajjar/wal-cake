@@ -66,6 +66,8 @@ func NewParquetWriter() ParquetWriter {
 		parquet.WithStats(true),
 		parquet.WithStatsFor("before", false),
 		parquet.WithStatsFor("after", false),
+		parquet.WithPageIndexEnabledFor("timestamp", true),
+		parquet.WithPageIndexEnabledFor("lsn", true),
 		parquet.WithSortingColumns(sorted),
 		parquet.WithCompression(compress.Codecs.Zstd),
 		parquet.WithCompressionLevel(3),
@@ -138,7 +140,7 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 
 	beforeNode, err := schema.NewPrimitiveNodeLogical(
 		"before",
-		parquet.Repetitions.Optional,
+		parquet.Repetitions.Required,
 		schema.JSONLogicalType{},
 		parquet.Types.ByteArray,
 		-1,
@@ -150,7 +152,7 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 
 	afterNode, err := schema.NewPrimitiveNodeLogical(
 		"after",
-		parquet.Repetitions.Optional,
+		parquet.Repetitions.Required,
 		schema.JSONLogicalType{},
 		parquet.Types.ByteArray,
 		-1,

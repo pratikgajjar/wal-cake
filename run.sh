@@ -9,4 +9,4 @@ export AWS_ENDPOINT="http://localhost:9000"
 export NAMESPACE="walcake"
 export LOG_LEVEL="debug"
 
-exec go run cmd/cake/main.go -batch-size 100 -concurrency 1 -flush-interval 10s
+exec go run cmd/cake/main.go -batch-size 1000 -concurrency 1 -flush-interval 10s
