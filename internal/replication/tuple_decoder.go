@@ -1,106 +1,129 @@
 package replication
 
 import (
-	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/jackc/pglogrepl"
 )
 
-// TypeDecoder defines an interface for decoding column values based on PostgreSQL types
-type TypeDecoder interface {
-	// Decode takes raw column data and returns the decoded value
-	Decode(data []byte) any
+// PostgreSQL Type OIDs for common numeric types
+const (
+	Int2OID   uint32 = 21    // smallint
+	Int4OID   uint32 = 23    // integer
+	Int8OID   uint32 = 20    // bigint
+	Float4OID uint32 = 700   // real/float4
+	Float8OID uint32 = 701   // double precision/float8
+	NumericOID uint32 = 1700 // numeric/decimal
+	BoolOID   uint32 = 16    // boolean
+)
+
+// TypeHandler defines an interface for handling column values based on PostgreSQL types
+type TypeHandler interface {
+	// Handle processes raw column data and returns the appropriate value
+	Handle(data []byte) any
 }
 
-// BasicDecoder handles simple data types
-type BasicDecoder struct {
-	decoder func([]byte) any
+// DataTypeRegistry maintains mapping of PostgreSQL type OIDs to handlers
+type DataTypeRegistry struct {
+	handlers map[uint32]TypeHandler
 }
 
-func (d *BasicDecoder) Decode(data []byte) any {
-	return d.decoder(data)
-}
-
-// JSONDecoder handles JSON and JSONB types
-type JSONDecoder struct{}
-
-func (d *JSONDecoder) Decode(data []byte) any {
-	var jsonData any
-	if err := json.Unmarshal(data, &jsonData); err == nil {
-		return jsonData
-	}
-	// Fall back to string if not valid JSON
-	return string(data)
-}
-
-// TextDecoder handles text data types
-type TextDecoder struct{}
-
-func (d *TextDecoder) Decode(data []byte) any {
-	return string(data)
-}
-
-// BinaryDecoder is a fallback for binary data without specific decoders
-type BinaryDecoder struct{}
-
-func (d *BinaryDecoder) Decode(data []byte) any {
-	return fmt.Sprintf("binary(%d bytes): %x", len(data), data)
-}
-
-// TypeDecoderRegistry maintains mapping of PostgreSQL type OIDs to decoders
-type TypeDecoderRegistry struct {
-	decoders map[uint32]TypeDecoder
-	fallback TypeDecoder
-}
-
-// NewTypeDecoderRegistry creates a registry with default decoders
-func NewTypeDecoderRegistry() *TypeDecoderRegistry {
-	registry := &TypeDecoderRegistry{
-		decoders: make(map[uint32]TypeDecoder),
-		fallback: &TextDecoder{},
+// NewDataTypeRegistry creates a registry with default handlers
+func NewDataTypeRegistry() *DataTypeRegistry {
+	registry := &DataTypeRegistry{
+		handlers: make(map[uint32]TypeHandler),
 	}
 
-	// Register default decoders
-	registry.RegisterDecoder(114, &JSONDecoder{})  // json
-	registry.RegisterDecoder(3802, &JSONDecoder{}) // jsonb
-
-	// Add more default decoders as needed
+	// Register numeric type handlers
+	registry.RegisterHandler(Int2OID, &IntegerHandler{})
+	registry.RegisterHandler(Int4OID, &IntegerHandler{})
+	registry.RegisterHandler(Int8OID, &IntegerHandler{})
+	registry.RegisterHandler(Float4OID, &FloatHandler{})
+	registry.RegisterHandler(Float8OID, &FloatHandler{})
+	registry.RegisterHandler(NumericOID, &NumericHandler{})
+	registry.RegisterHandler(BoolOID, &BooleanHandler{})
 
 	return registry
 }
 
-// RegisterDecoder adds a decoder for a specific PostgreSQL type
-func (r *TypeDecoderRegistry) RegisterDecoder(typeOID uint32, decoder TypeDecoder) {
-	r.decoders[typeOID] = decoder
+// RegisterHandler adds a handler for a specific PostgreSQL type
+func (r *DataTypeRegistry) RegisterHandler(typeOID uint32, handler TypeHandler) {
+	r.handlers[typeOID] = handler
 }
 
-// GetDecoder returns the appropriate decoder for a given type
-func (r *TypeDecoderRegistry) GetDecoder(typeOID uint32) TypeDecoder {
-	if decoder, exists := r.decoders[typeOID]; exists {
-		return decoder
+// GetHandler returns the appropriate handler for a given type
+func (r *DataTypeRegistry) GetHandler(typeOID uint32) (TypeHandler, bool) {
+	handler, exists := r.handlers[typeOID]
+	return handler, exists
+}
+
+// IntegerHandler handles integer type conversions
+type IntegerHandler struct{}
+
+func (h *IntegerHandler) Handle(data []byte) any {
+	if n, err := strconv.ParseInt(string(data), 10, 64); err == nil {
+		return n
 	}
-	return r.fallback
+	// Fall back to string if parsing fails
+	return string(data)
+}
+
+// FloatHandler handles float type conversions
+type FloatHandler struct{}
+
+func (h *FloatHandler) Handle(data []byte) any {
+	if n, err := strconv.ParseFloat(string(data), 64); err == nil {
+		return n
+	}
+	// Fall back to string if parsing fails
+	return string(data)
+}
+
+// NumericHandler handles numeric/decimal type conversions
+type NumericHandler struct{}
+
+func (h *NumericHandler) Handle(data []byte) any {
+	if n, err := strconv.ParseFloat(string(data), 64); err == nil {
+		return n
+	}
+	// Fall back to string if parsing fails
+	return string(data)
+}
+
+// BooleanHandler handles boolean type conversions
+type BooleanHandler struct{}
+
+func (h *BooleanHandler) Handle(data []byte) any {
+	s := string(data)
+	if s == "t" || s == "true" || s == "1" {
+		return true
+	}
+	if s == "f" || s == "false" || s == "0" {
+		return false
+	}
+	// Fall back to string if parsing fails
+	return s
 }
 
 // TupleDecoder handles tuple data extraction
 type TupleDecoder struct {
-	registry *TypeDecoderRegistry
+	registry *DataTypeRegistry
 }
 
-// NewTupleDecoder creates a new tuple decoder with default type decoders
+// NewTupleDecoder creates a new tuple decoder with default type handlers
 func NewTupleDecoder() *TupleDecoder {
 	return &TupleDecoder{
-		registry: NewTypeDecoderRegistry(),
+		registry: NewDataTypeRegistry(),
 	}
 }
 
-// RegisterTypeDecoder adds a custom type decoder to the registry
-func (d *TupleDecoder) RegisterTypeDecoder(typeOID uint32, decoder TypeDecoder) {
-	d.registry.RegisterDecoder(typeOID, decoder)
+// RegisterTypeHandler adds a custom type handler to the registry
+func (d *TupleDecoder) RegisterTypeHandler(typeOID uint32, handler TypeHandler) {
+	d.registry.RegisterHandler(typeOID, handler)
 }
 
-// ExtractTupleData converts a tuple's data into a map of column name -> value
+// ExtractTupleData converts a tuple data into a map of column name -> value
 func (d *TupleDecoder) ExtractTupleData(tuple *pglogrepl.TupleData, columns []*pglogrepl.RelationMessageColumn) map[string]any {
 	return d.extractTuple(tuple, columns, false)
 }
@@ -120,12 +143,12 @@ func (d *TupleDecoder) extractTuple(tuple *pglogrepl.TupleData, columns []*pglog
 
 	// Process each column in the tuple
 	for i, col := range tuple.Columns {
-		// Skip if we don't have column info or if the column index is out of range
+		// Skip if we do not have column info or if the column index is out of range
 		if i >= len(columns) {
 			continue
 		}
 
-		// For key-only tuples, skip NULL columns as they're not part of the key
+		// For key-only tuples, skip NULL columns as they are not part of the key
 		if keyOnly && col.DataType == pglogrepl.TupleDataTypeNull {
 			continue
 		}
@@ -143,31 +166,21 @@ func (d *TupleDecoder) extractTuple(tuple *pglogrepl.TupleData, columns []*pglog
 			data[colName] = "<TOAST>"
 
 		case pglogrepl.TupleDataTypeText:
-			decoder := d.registry.GetDecoder(pgType)
-			data[colName] = decoder.Decode(col.Data)
+			// Try to use a type-specific handler if one exists
+			if handler, exists := d.registry.GetHandler(pgType); exists {
+				data[colName] = handler.Handle(col.Data)
+			} else {
+				// Default to string for text data
+				data[colName] = string(col.Data)
+			}
 
 		case pglogrepl.TupleDataTypeBinary:
-			// For binary, we might want specialized decoders based on the type
-			data[colName] = d.decodeBinaryValue(col.Data, pgType)
+			// For binary data, just return a string representation for now
+			data[colName] = fmt.Sprintf("binary(%d bytes)", len(col.Data))
 		}
 	}
 
 	return data
-}
-
-// decodeBinaryValue handles decoding of binary data
-func (d *TupleDecoder) decodeBinaryValue(data []byte, typeOID uint32) any {
-	if len(data) == 0 {
-		return nil
-	}
-
-	// In a real implementation, you would have specific decoders for binary data
-	// This is a placeholder that should be expanded with proper binary decoders
-	switch typeOID {
-	// Add cases for specific binary types here
-	default:
-		return (&BinaryDecoder{}).Decode(data)
-	}
 }
 
 // For backwards compatibility with existing code
