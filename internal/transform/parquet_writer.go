@@ -51,12 +51,25 @@ func (w *writerTell) Tell() int64 {
 // NewParquetWriter creates a new Parquet writer with ZSTD compression
 func NewParquetWriter() ParquetWriter {
 	// Create writer properties with ZSTD compression
+	sorted := []parquet.SortingColumn{
+		{ColumnIdx: 2, Descending: false, NullsFirst: false}, // timestamp
+		{ColumnIdx: 3, Descending: false, NullsFirst: false}, // lsn
+	}
 	props := parquet.NewWriterProperties(
+		parquet.WithDictionaryDefault(false),
+		parquet.WithDictionaryFor("table", true),
+		parquet.WithDictionaryFor("operation", true),
+		parquet.WithEncodingFor("timestamp", parquet.Encodings.DeltaBinaryPacked),
+		parquet.WithEncodingFor("lsn", parquet.Encodings.DeltaBinaryPacked),
+		parquet.WithEncodingFor("before", parquet.Encodings.Plain),
+		parquet.WithEncodingFor("after", parquet.Encodings.Plain),
+		parquet.WithStats(true),
+		parquet.WithStatsFor("before", false),
+		parquet.WithStatsFor("after", false),
+		parquet.WithSortingColumns(sorted),
 		parquet.WithCompression(compress.Codecs.Zstd),
 		parquet.WithCompressionLevel(3),
-		parquet.WithDictionaryDefault(true),
-		parquet.WithStats(true),
-		parquet.WithCreatedBy("wal-cake"),
+		parquet.WithCreatedBy("wal-cake #pg"),
 	)
 	return &parquetWriter{
 		props:   props,
