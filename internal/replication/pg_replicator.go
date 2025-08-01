@@ -27,6 +27,7 @@ type PGReplicator interface {
 	// Start begins replication and sends CDC events to the provided channel
 	// It also listens for acknowledged LSNs on the ackCh to update the replication position
 	Start(ctx context.Context, eventsCh chan<- *model.CDCEvent, ackCh <-chan uint64) error
+	HealthCheck(ctx context.Context) error
 }
 
 type relationInfo struct {
@@ -272,6 +273,21 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 			}
 		}
 	}
+}
+
+func (r *pgReplicator) HealthCheck(ctx context.Context) error {
+	if r.queryConn == nil {
+		return errors.New("query connection is not initialized")
+	}
+	if err := r.queryConn.Ping(ctx); err != nil {
+		return fmt.Errorf("failed to ping query connection: %w", err)
+	}
+
+	if r.repConn == nil {
+		return errors.New("replication connection is not initialized")
+	}
+
+	return nil
 }
 
 func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos pglogrepl.LSN, ch chan<- *model.CDCEvent) {

@@ -13,6 +13,7 @@ import (
 	"git.famapp.in/fampay-inc/wal-cake/internal/config"
 	"git.famapp.in/fampay-inc/wal-cake/internal/model"
 	"git.famapp.in/fampay-inc/wal-cake/internal/replication"
+	"git.famapp.in/fampay-inc/wal-cake/internal/server"
 	"git.famapp.in/fampay-inc/wal-cake/internal/storage"
 	"git.famapp.in/fampay-inc/wal-cake/internal/transform"
 )
@@ -43,6 +44,7 @@ func main() {
 	repl := replication.NewPGReplicator(cfg)
 	transformer := transform.NewParquetWriter()
 	uploader := storage.NewS3Uploader(cfg)
+	httpServer := server.New(8080, repl)
 
 	// Add filter to exclude commit events from Parquet files
 	transformer.AddFilter(func(event *model.CDCEvent) bool {
@@ -81,6 +83,9 @@ func main() {
 		Dur("flushInterval", cfg.FlushInterval).
 		Msg("Starting ring buffer")
 
+	// Start the HTTP server for health checks
+	httpServer.Start()
+
 	if err := rb.Start(ctx, eventsCh); err != nil {
 		log.Fatal().Err(err).Msg("Ring buffer error")
 	}
@@ -88,4 +93,9 @@ func main() {
 	// Wait for context cancellation
 	<-ctx.Done()
 	log.Info().Msg("Shutting down")
+
+	// Shutdown the HTTP server gracefully
+	if err := httpServer.Shutdown(context.Background()); err != nil {
+		log.Error().Err(err).Msg("HTTP server shutdown error")
+	}
 }
