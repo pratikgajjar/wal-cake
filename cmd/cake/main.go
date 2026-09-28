@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"git.famapp.in/fampay-inc/wal-cake/internal/ack"
 	"git.famapp.in/fampay-inc/wal-cake/internal/buffer"
 	"git.famapp.in/fampay-inc/wal-cake/internal/config"
 	"git.famapp.in/fampay-inc/wal-cake/internal/model"
@@ -36,9 +37,9 @@ func main() {
 	// Channel for CDC events from the replicator
 	eventsCh := make(chan *model.CDCEvent, cfg.BatchSize*cfg.Concurrency)
 
-	// Channel for acknowledging LSNs after successful processing
-	ackCh := make(chan uint64, cfg.Concurrency*2)
-	defer close(ackCh)
+	// Highest LSN that is durable in S3, published by the ring buffer and
+	// confirmed to the slot by the replicator.
+	acked := &ack.Position{}
 
 	// Initialize components
 	repl := replication.NewPGReplicator(cfg)
@@ -66,12 +67,16 @@ func main() {
 		cfg.Concurrency,
 		cfg.FlushInterval,
 		processor,
-		ackCh,
+		acked,
 	)
 
-	// Start the replicator in a separate goroutine
+	// The replicator gets its own context: on shutdown it must keep the
+	// connection until the ring has drained, then send the final ACK.
+	replCtx, stopRepl := context.WithCancel(context.Background())
+	replDone := make(chan struct{})
 	go func() {
-		if err := repl.Start(ctx, eventsCh, ackCh); err != nil {
+		defer close(replDone)
+		if err := repl.Start(replCtx, eventsCh, acked); err != nil {
 			log.Fatal().Err(err).Msg("Replication error")
 		}
 	}()
@@ -86,13 +91,16 @@ func main() {
 	// Start the HTTP server for health checks
 	httpServer.Start()
 
+	// Runs until SIGINT/SIGTERM, then drains in-flight segments.
 	if err := rb.Start(ctx, eventsCh); err != nil {
 		log.Fatal().Err(err).Msg("Ring buffer error")
 	}
-
-	// Wait for context cancellation
-	<-ctx.Done()
 	log.Info().Msg("Shutting down")
+
+	// The ring has drained, so acked is final. Stop the replicator, which
+	// confirms it to the slot before closing the connection.
+	stopRepl()
+	<-replDone
 
 	// Shutdown the HTTP server gracefully
 	if err := httpServer.Shutdown(context.Background()); err != nil {

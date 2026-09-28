@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/rs/zerolog/log"
 
+	"git.famapp.in/fampay-inc/wal-cake/internal/ack"
 	"git.famapp.in/fampay-inc/wal-cake/internal/config"
 	"git.famapp.in/fampay-inc/wal-cake/internal/model"
 )
@@ -25,9 +26,10 @@ const (
 
 // PGReplicator interface defines methods for PostgreSQL logical replication
 type PGReplicator interface {
-	// Start begins replication and sends CDC events to the provided channel
-	// It also listens for acknowledged LSNs on the ackCh to update the replication position
-	Start(ctx context.Context, eventsCh chan<- *model.CDCEvent, ackCh <-chan uint64) error
+	// Start streams CDC events to eventsCh and confirms acked to the slot
+	// until ctx is cancelled. Before it returns, it sends a final status
+	// update with the latest acked position.
+	Start(ctx context.Context, eventsCh chan<- *model.CDCEvent, acked *ack.Position) error
 	HealthCheck(ctx context.Context) error
 }
 
@@ -139,10 +141,10 @@ const (
 // reason (connection loss, server error, a message it cannot parse), it
 // reconnects with backoff and resumes from the slot's confirmed position, so
 // nothing is skipped. It returns nil after ctx is cancelled.
-func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ackCh <-chan uint64) error {
+func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, acked *ack.Position) error {
 	backoff := minReconnectBackoff
 	for {
-		streamed, err := r.stream(ctx, ch, ackCh)
+		streamed, err := r.stream(ctx, ch, acked)
 		r.streaming.Store(false)
 		if ctx.Err() != nil {
 			return nil
@@ -162,7 +164,7 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 
 // stream runs one replication session. streamed reports whether
 // START_REPLICATION succeeded, so Start can reset its backoff.
-func (r *pgReplicator) stream(ctx context.Context, ch chan<- *model.CDCEvent, ackCh <-chan uint64) (streamed bool, err error) {
+func (r *pgReplicator) stream(ctx context.Context, ch chan<- *model.CDCEvent, acked *ack.Position) (streamed bool, err error) {
 	log.Info().Str("slot", r.cfg.Slot).Str("publication", r.cfg.Publication).Msg("Starting PostgreSQL replication")
 
 	r.repConn, err = pgconn.Connect(ctx, r.cfg.PGConn+"?replication=database")
@@ -189,37 +191,55 @@ func (r *pgReplicator) stream(ctx context.Context, ch chan<- *model.CDCEvent, ac
 	r.streaming.Store(true)
 	log.Info().Str("lsn", startLSN.String()).Msg("Streaming from the slot's confirmed position")
 
-	const receiveTimeout = 5 * time.Second
-	standbyMessageTicker := time.NewTicker(receiveTimeout)
+	// On shutdown, confirm everything the ring finished. The connection is
+	// still open here; the deferred Close above runs after this.
+	defer func() {
+		if ctx.Err() == nil {
+			return
+		}
+		r.lastAckedLSN = max(r.lastAckedLSN, pglogrepl.LSN(acked.Load()))
+		finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := r.SendStandbyStatusUpdate(finalCtx, false); err != nil {
+			log.Warn().Err(err).Msg("Final status update failed; the slot will replay from the previous position")
+			return
+		}
+		log.Info().Str("lsn", r.lastAckedLSN.String()).Msg("Sent final status update")
+	}()
+
+	const (
+		// receiveTimeout bounds how long the loop waits for a message before
+		// it forwards a new ACK or notices shutdown. The receive context is
+		// not derived from ctx: cancelling a read closes the connection, and
+		// the final status update needs it.
+		receiveTimeout = time.Second
+		statusInterval = 5 * time.Second
+	)
+	standbyMessageTicker := time.NewTicker(statusInterval)
 	defer standbyMessageTicker.Stop()
 
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return true, nil
-		case lsn := <-ackCh:
-			if newLSN := pglogrepl.LSN(lsn); newLSN > r.lastAckedLSN {
-				r.lastAckedLSN = newLSN
-				if err := r.SendStandbyStatusUpdate(ctx, false); err != nil {
-					return true, err
-				}
+		}
+		if lsn := pglogrepl.LSN(acked.Load()); lsn > r.lastAckedLSN {
+			r.lastAckedLSN = lsn
+			if err := r.SendStandbyStatusUpdate(ctx, false); err != nil {
+				return true, err
 			}
-			continue
+		}
+		select {
 		case <-standbyMessageTicker.C:
 			if err := r.SendStandbyStatusUpdate(ctx, true); err != nil {
 				return true, err
 			}
-			continue
 		default:
 		}
 
-		receiveCtx, cancel := context.WithTimeout(ctx, receiveTimeout)
+		receiveCtx, cancel := context.WithTimeout(context.Background(), receiveTimeout)
 		msg, err := r.repConn.ReceiveMessage(receiveCtx)
 		cancel()
 		if err != nil {
-			if ctx.Err() != nil {
-				return true, nil
-			}
 			if pgconn.Timeout(err) {
 				continue
 			}

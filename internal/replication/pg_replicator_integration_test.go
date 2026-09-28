@@ -9,11 +9,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"git.famapp.in/fampay-inc/wal-cake/internal/ack"
 	"git.famapp.in/fampay-inc/wal-cake/internal/config"
 	"git.famapp.in/fampay-inc/wal-cake/internal/model"
 )
@@ -57,26 +59,29 @@ func setup(t *testing.T, dsn, name string) (*pgx.Conn, *config.Config) {
 type running struct {
 	repl   PGReplicator
 	events chan *model.CDCEvent
-	acks   chan uint64
+	acked  *ack.Position
 	cancel context.CancelFunc
 	done   chan error
+	once   sync.Once
 }
 
 func start(t *testing.T, cfg *config.Config) *running {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &running{repl: NewPGReplicator(cfg), events: make(chan *model.CDCEvent, 100), acks: make(chan uint64, 4), cancel: cancel, done: make(chan error, 1)}
-	go func() { r.done <- r.repl.Start(ctx, r.events, r.acks) }()
+	r := &running{repl: NewPGReplicator(cfg), events: make(chan *model.CDCEvent, 100), acked: &ack.Position{}, cancel: cancel, done: make(chan error, 1)}
+	go func() { r.done <- r.repl.Start(ctx, r.events, r.acked) }()
 	t.Cleanup(r.stop)
 	return r
 }
 
 func (r *running) stop() {
-	r.cancel()
-	select {
-	case <-r.done:
-	case <-time.After(10 * time.Second):
-	}
+	r.once.Do(func() {
+		r.cancel()
+		select {
+		case <-r.done:
+		case <-time.After(10 * time.Second):
+		}
+	})
 }
 
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
@@ -151,7 +156,7 @@ func TestACKAfterCommitDoesNotSkipNextTransaction(t *testing.T) {
 	}
 
 	// Confirm T1 only, as the ring does when T1 is uploaded and T2 is not.
-	r1.acks <- t1Commit.LSN
+	r1.acked.Advance(t1Commit.LSN)
 	want := model.LSNStr(t1Commit.LSN)
 	waitFor(t, "slot to confirm T1", 15*time.Second, func() bool { return slotField(t, c, cfg.Slot, "confirmed_flush_lsn") == want })
 	r1.stop() // crash before T2 is uploaded
@@ -209,5 +214,32 @@ func TestStartLSNFailsClosed(t *testing.T) {
 	r.queryConn.Close(ctx) // the slot query will fail
 	if lsn, err := r.getStartLSN(ctx); err == nil {
 		t.Fatalf("getStartLSN returned %s and no error", lsn)
+	}
+}
+
+// TestShutdownConfirmsFinalPosition checks that stopping the replicator
+// confirms the latest acked position before it closes the connection.
+func TestShutdownConfirmsFinalPosition(t *testing.T) {
+	dsn := testDSN(t)
+	c, cfg := setup(t, dsn, "walcake_shutdown")
+	r := start(t, cfg)
+	waitFor(t, "slot active", 10*time.Second, func() bool { return slotField(t, c, cfg.Slot, "active") == "true" })
+
+	mustExec(t, c, "INSERT INTO walcake_shutdown VALUES ('x')")
+	var commit *model.CDCEvent
+	for commit == nil {
+		ev := next(t, r.events, 10*time.Second)
+		if ev == nil {
+			t.Fatal("no commit event")
+		}
+		if ev.Operation == model.CommitOp {
+			commit = ev
+		}
+	}
+	r.acked.Advance(commit.LSN)
+	r.stop() // immediately, before any periodic update
+
+	if got, want := slotField(t, c, cfg.Slot, "confirmed_flush_lsn"), model.LSNStr(commit.LSN); got != want {
+		t.Fatalf("confirmed_flush_lsn = %s after shutdown, want %s", got, want)
 	}
 }
