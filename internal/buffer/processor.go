@@ -56,20 +56,21 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 		return p.Upload(ctx, events)
 	}
 
+	// Upload one file per date. Events are in WAL order, so each date is a contiguous run.
 	curDate := events[0].Date()
-	left, right := 0, 0
-	for right, e := range events {
+	left := 0
+	for i, e := range events {
 		nextDate := e.Date()
 		if !nextDate.Equal(curDate) {
-			if err := p.Upload(ctx, events[left:right]); err != nil {
+			if err := p.Upload(ctx, events[left:i]); err != nil {
 				return err
 			}
 			curDate = nextDate
-			left = right
+			left = i
 		}
 	}
 
-	return p.Upload(ctx, events[left:right+1])
+	return p.Upload(ctx, events[left:])
 }
 
 func (p *ParquetBatchProcessor) Upload(ctx context.Context, events []*model.CDCEvent) error {
