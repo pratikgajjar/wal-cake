@@ -92,8 +92,29 @@ func TestProcessUsesUTCCommitDate(t *testing.T) {
 	if err := p.Process(context.Background(), events); err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("ns/2026/05/09/%d.ZSTD.parquet", decoded.UnixMicro())
+	want := fmt.Sprintf("ns/2026/05/09/%d-1.ZSTD.parquet", decoded.UnixMicro())
 	if len(u.keys) != 1 || u.keys[0] != want {
 		t.Fatalf("keys = %v, want [%s]", u.keys, want)
+	}
+}
+
+// Separate segments whose last events decoded in the same microsecond must
+// not share a key.
+func TestKeysAreUniqueAcrossSegments(t *testing.T) {
+	ts := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	w, u := &recordingWriter{}, &recordingUploader{}
+	p := NewParquetBatchProcessor(w, u, &BatchProcessorConfig{Namespace: "ns"})
+	for i := range 3 {
+		ev := &model.CDCEvent{Table: "t", Operation: model.InsertOp, Timestamp: ts, CommitTime: ts, LSN: uint64(i + 1)}
+		if err := p.Process(context.Background(), []*model.CDCEvent{ev}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[string]bool{}
+	for _, k := range u.keys {
+		if seen[k] {
+			t.Fatalf("duplicate key %s in %v", k, u.keys)
+		}
+		seen[k] = true
 	}
 }

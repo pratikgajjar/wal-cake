@@ -3,6 +3,7 @@ package buffer
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -22,6 +23,7 @@ type ParquetBatchProcessor struct {
 	transformer transform.ParquetWriter
 	uploader    storage.S3Uploader
 	config      *BatchProcessorConfig
+	seq         atomic.Uint64 // makes every key from this process unique
 }
 
 // NewParquetBatchProcessor creates a new batch processor for Parquet files
@@ -102,14 +104,17 @@ func (p *ParquetBatchProcessor) Upload(ctx context.Context, date time.Time, even
 	return nil
 }
 
-// generateS3Key returns namespace/YYYY/MM/DD/<decode-time-µs>.<codec>.parquet.
-// The folder is the UTC commit date; the file name is the last event's
-// decode time, which is unique per segment.
+// generateS3Key returns namespace/YYYY/MM/DD/<decode-time-µs>-<seq>.<codec>.parquet.
+// The folder is the UTC commit date. The decode time alone is not unique:
+// events decode in well under a microsecond, so two files in one folder can
+// end on the same microsecond, and the second PUT would overwrite the first.
+// seq is unique within the process; a restarted process decodes later.
 func (p *ParquetBatchProcessor) generateS3Key(date, lastDecoded time.Time) string {
-	key := fmt.Sprintf("%s/%s/%d.%s.parquet",
+	key := fmt.Sprintf("%s/%s/%d-%d.%s.parquet",
 		p.config.Namespace,
 		date.UTC().Format("2006/01/02"),
 		lastDecoded.UnixMicro(),
+		p.seq.Add(1),
 		p.transformer.GetCompressionCodec(),
 	)
 	return key

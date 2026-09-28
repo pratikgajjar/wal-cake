@@ -1,0 +1,105 @@
+# 2026/09/27 19:12:40.158552 [TestProcessProperty] [rapid] draw n: 7
+# 2026/09/27 19:12:40.158571 [TestProcessProperty] [rapid] draw commitMs: 0
+# 2026/09/27 19:12:40.158572 [TestProcessProperty] [rapid] draw perMicro: 1
+# 2026/09/27 19:12:40.158572 [TestProcessProperty] [rapid] draw commitZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158636 [TestProcessProperty] [rapid] draw decodeZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158638 [TestProcessProperty] [rapid] draw commitMs: 0
+# 2026/09/27 19:12:40.158638 [TestProcessProperty] [rapid] draw perMicro: 1
+# 2026/09/27 19:12:40.158638 [TestProcessProperty] [rapid] draw commitZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158639 [TestProcessProperty] [rapid] draw decodeZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158640 [TestProcessProperty] [rapid] draw commitMs: 0
+# 2026/09/27 19:12:40.158641 [TestProcessProperty] [rapid] draw perMicro: 1
+# 2026/09/27 19:12:40.158641 [TestProcessProperty] [rapid] draw commitZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158642 [TestProcessProperty] [rapid] draw decodeZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158642 [TestProcessProperty] [rapid] draw commitMs: 0
+# 2026/09/27 19:12:40.158643 [TestProcessProperty] [rapid] draw perMicro: 1
+# 2026/09/27 19:12:40.158643 [TestProcessProperty] [rapid] draw commitZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158644 [TestProcessProperty] [rapid] draw decodeZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158644 [TestProcessProperty] [rapid] draw commitMs: -1
+# 2026/09/27 19:12:40.158645 [TestProcessProperty] [rapid] draw perMicro: 2
+# 2026/09/27 19:12:40.158645 [TestProcessProperty] [rapid] draw commitZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158651 [TestProcessProperty] [rapid] draw decodeZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158652 [TestProcessProperty] [rapid] draw commitMs: 0
+# 2026/09/27 19:12:40.158652 [TestProcessProperty] [rapid] draw perMicro: 1
+# 2026/09/27 19:12:40.158652 [TestProcessProperty] [rapid] draw commitZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158653 [TestProcessProperty] [rapid] draw decodeZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158654 [TestProcessProperty] [rapid] draw commitMs: -1
+# 2026/09/27 19:12:40.158654 [TestProcessProperty] [rapid] draw perMicro: 3
+# 2026/09/27 19:12:40.158654 [TestProcessProperty] [rapid] draw commitZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158655 [TestProcessProperty] [rapid] draw decodeZone: &time.Location{name:"UTC", zone:[]time.zone(nil), tx:[]time.zoneTrans(nil), extend:"", cacheStart:0, cacheEnd:0, cacheZone:(*time.zone)(nil)}
+# 2026/09/27 19:12:40.158669 [TestProcessProperty] files 1 and 3 share key ns/2026/05/09/1778371200000002.ZSTD.parquet: the second overwrites the first
+# 
+v0.4.8#5472872874674205946
+0x0
+0x6b74f03291620
+0x6
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x10000000000000
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x10000000000000
+0x0
+0x0
+0x0
+0x38e38e38e38e4
+0x2
+0x0
+0x0
+0x0
+0x0
