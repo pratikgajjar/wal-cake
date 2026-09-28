@@ -99,7 +99,10 @@ wal-cake/
 ├── cmd/
 │   └── cake/          # Main application entry point
 ├── internal/
+│   ├── ack/           # Highest LSN that is safe to confirm to the slot
+│   ├── buffer/        # Ring buffer, segment tracker, batch processor
 │   ├── config/        # Configuration handling
+│   ├── e2e/           # Whole-pipeline property tests (needs Postgres)
 │   ├── model/         # Data models
 │   ├── replication/   # PostgreSQL replication logic
 │   ├── storage/       # S3 storage interface
@@ -107,3 +110,32 @@ wal-cake/
 ├── docker-compose.yml # Local development environment
 └── run.sh             # Convenience script for running the application
 ```
+
+### Testing
+
+Unit and property tests need nothing else:
+
+```bash
+go test -race ./...
+```
+
+Integration and end-to-end tests need Postgres with `wal_level=logical`
+(the `docker-compose.yml` service works). They are skipped unless
+`WALCAKE_TEST_PG` is set to a connection URL without query parameters:
+
+```bash
+export WALCAKE_TEST_PG=postgres://postgres:postgres@127.0.0.1:5432/postgres
+go test -race ./internal/replication
+go test ./internal/e2e -rapid.checks=10 -v
+```
+
+`internal/e2e` is a stateful property test. It runs random histories of
+single-row, multi-row, and COPY transactions, back-to-back commits,
+updates, deletes, rollbacks, killed walsenders, crashes, and graceful
+restarts against the real pipeline, with an in-memory S3 that fails and
+delays uploads. After recovery, every committed change must be in S3,
+no rolled-back row may be, every file must hold one UTC commit date, and
+the slot must never move backwards.
+
+`TestRingCapacity` measures ring throughput with a simulated uploader. It
+takes about a minute, so it only runs with `WALCAKE_CAPACITY=1`.
