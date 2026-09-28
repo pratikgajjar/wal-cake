@@ -142,7 +142,7 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 
 	beforeNode, err := schema.NewPrimitiveNodeLogical(
 		"before",
-		parquet.Repetitions.Required,
+		parquet.Repetitions.Optional, // null when the row image does not exist
 		schema.JSONLogicalType{},
 		parquet.Types.ByteArray,
 		-1,
@@ -154,7 +154,7 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 
 	afterNode, err := schema.NewPrimitiveNodeLogical(
 		"after",
-		parquet.Repetitions.Required,
+		parquet.Repetitions.Optional, // null when the row image does not exist
 		schema.JSONLogicalType{},
 		parquet.Types.ByteArray,
 		-1,
@@ -208,9 +208,12 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 	opData := make([]parquet.ByteArray, validCount)
 	tsData := make([]int64, validCount)
 	lsnData := make([]int64, validCount)
-	beforeJsonArr := make([]parquet.ByteArray, validCount)
+	// before and after are optional. Their value slices hold only the
+	// non-null values; the definition level marks each row as null (0) or
+	// present (1). An insert has no before image and a delete has no after.
+	beforeJsonArr := make([]parquet.ByteArray, 0, validCount)
 	defBefore := make([]int16, validCount)
-	afterJsonArr := make([]parquet.ByteArray, validCount)
+	afterJsonArr := make([]parquet.ByteArray, 0, validCount)
 	defAfter := make([]int16, validCount)
 
 	// Fill column data arrays in a single pass
@@ -229,29 +232,20 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 		// LSN column
 		lsnData[index] = int64(ev.LSN)
 
-		// Process before data
 		if ev.Before != nil {
 			beforeJson, err := json.Marshal(ev.Before)
 			if err != nil {
 				return fmt.Errorf("marshal CDC before data to JSON: %w", err)
 			}
-			beforeJsonArr[index] = beforeJson
-			defBefore[index] = 1
-		} else {
-			beforeJsonArr[index] = nil
+			beforeJsonArr = append(beforeJsonArr, beforeJson)
 			defBefore[index] = 1
 		}
-
-		// Process after data
 		if ev.After != nil {
 			afterJson, err := json.Marshal(ev.After)
 			if err != nil {
 				return fmt.Errorf("marshal CDC after data to JSON: %w", err)
 			}
-			afterJsonArr[index] = afterJson
-			defAfter[index] = 1
-		} else {
-			afterJsonArr[index] = nil
+			afterJsonArr = append(afterJsonArr, afterJson)
 			defAfter[index] = 1
 		}
 

@@ -2,10 +2,12 @@ package transform
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/file"
 
@@ -72,5 +74,47 @@ func BenchmarkWriteToBuffer1000(b *testing.B) {
 		if _, err := w.WriteToBuffer(events); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// Missing row images are null, not empty bytes, and NUMERIC digits survive.
+func TestRowImagesAreNullableJSON(t *testing.T) {
+	ts := time.Date(2026, 5, 9, 10, 0, 0, 0, time.UTC)
+	events := []*model.CDCEvent{
+		{Table: "t", Operation: model.InsertOp, Timestamp: ts, LSN: 1, After: map[string]any{"amount": json.Number("9999999999999999.99")}},
+		{Table: "t", Operation: model.DeleteOp, Timestamp: ts, LSN: 2, Before: map[string]any{"id": int64(1)}},
+	}
+	buf, err := NewParquetWriter().WriteToBuffer(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := file.NewParquetReader(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(col int) ([]parquet.ByteArray, []int16) {
+		cr, err := r.RowGroup(0).Column(col)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vals := make([]parquet.ByteArray, 2)
+		defs := make([]int16, 2)
+		_, n, err := cr.(*file.ByteArrayColumnChunkReader).ReadBatch(2, vals, defs, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return vals[:n], defs
+	}
+
+	before, beforeDefs := read(4)
+	after, afterDefs := read(5)
+	if beforeDefs[0] != 0 || afterDefs[1] != 0 {
+		t.Errorf("insert before def=%d, delete after def=%d, want 0 (null)", beforeDefs[0], afterDefs[1])
+	}
+	if len(before) != 1 || string(before[0]) != `{"id":1}` {
+		t.Errorf("before values = %q", before)
+	}
+	if len(after) != 1 || string(after[0]) != `{"amount":9999999999999999.99}` {
+		t.Errorf("after values = %q", after)
 	}
 }

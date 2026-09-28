@@ -1,6 +1,7 @@
 package replication
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -70,15 +71,20 @@ func (h *FloatHandler) Handle(data []byte) any {
 	return string(data)
 }
 
-// NumericHandler handles numeric/decimal type conversions
+// NumericHandler keeps NUMERIC values exact. Postgres sends them as decimal
+// text; converting to float64 rounded anything past about 15 significant
+// digits (9999999999999999.99 became 10000000000000000). json.Number is
+// written as a JSON number with the original digits. NaN and the infinities
+// are not valid JSON numbers, so they stay strings.
 type NumericHandler struct{}
 
 func (h *NumericHandler) Handle(data []byte) any {
-	if n, err := strconv.ParseFloat(string(data), 64); err == nil {
-		return n
+	s := string(data)
+	switch s {
+	case "NaN", "Infinity", "-Infinity":
+		return s
 	}
-	// Fall back to string if parsing fails
-	return string(data)
+	return json.Number(s)
 }
 
 // BooleanHandler handles boolean type conversions
