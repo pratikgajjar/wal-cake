@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -42,6 +43,9 @@ type pgReplicator struct {
 	lastAckedLSN pglogrepl.LSN
 	relations    map[uint32]relationInfo
 	decoder      *TupleDecoder
+	// streaming and blockedSince are read by HealthCheck from other goroutines.
+	streaming    atomic.Bool
+	blockedSince atomic.Int64 // unix nanoseconds, 0 when delivery is not blocked
 }
 
 // NewPGReplicator creates a new PostgreSQL replicator
@@ -96,24 +100,15 @@ func (r *pgReplicator) ensureReplicationSlot(ctx context.Context) error {
 	return nil
 }
 
-// getStartLSN gets the confirmed LSN position from the replication slot
+// getStartLSN reads the slot's confirmed position. It fails closed: starting
+// anywhere else could skip changes the slot still holds.
 func (r *pgReplicator) getStartLSN(ctx context.Context) (pglogrepl.LSN, error) {
-	// First try to get the confirmed LSN from the replication slot
 	var lsn pglogrepl.LSN
 	err := r.queryConn.QueryRow(ctx, "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1", r.cfg.Slot).Scan(&lsn)
-	if err == nil {
-		log.Info().Str("lsn", lsn.String()).Msg("Starting replication from confirmed LSN position")
-		return lsn, nil
-	}
-
-	// If we couldn't get a confirmed LSN, use the system position
-	identifyResult, err := pglogrepl.IdentifySystem(ctx, r.repConn)
 	if err != nil {
-		return 0, fmt.Errorf("failed to identify system: %w", err)
+		return 0, fmt.Errorf("read confirmed_flush_lsn of slot %q: %w", r.cfg.Slot, err)
 	}
-
-	log.Info().Str("lsn", identifyResult.XLogPos.String()).Msg("Starting replication from system XLogPos")
-	return identifyResult.XLogPos, nil
+	return lsn, nil
 }
 
 func (r *pgReplicator) SendStandbyStatusUpdate(ctx context.Context, replyRequested bool) error {
@@ -125,67 +120,75 @@ func (r *pgReplicator) SendStandbyStatusUpdate(ctx context.Context, replyRequest
 		ReplyRequested:   replyRequested,
 	}
 
-	err := pglogrepl.SendStandbyStatusUpdate(ctx, r.repConn, status)
-	if err != nil {
-		log.Warn().Err(err).Msg("failed to send standby status update")
-		return err
+	if err := pglogrepl.SendStandbyStatusUpdate(ctx, r.repConn, status); err != nil {
+		return fmt.Errorf("send standby status update: %w", err)
 	}
-	// Log standby status updates appropriately
-	if replyRequested {
-		log.Info().Str("lsn", r.lastAckedLSN.String()).Msg("Sent requested standby status update")
-	} else {
-		log.Debug().Str("lsn", r.lastAckedLSN.String()).Msg("Sent periodic standby status update")
-	}
-
+	log.Debug().Str("lsn", r.lastAckedLSN.String()).Bool("replyRequested", replyRequested).Msg("Sent standby status update")
 	return nil
 }
 
-func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ackCh <-chan uint64) error {
-	log.Info().Str("slot", r.cfg.Slot).Str("publication", r.cfg.Publication).Msg("starting PostgreSQL replication")
+const (
+	minReconnectBackoff = time.Second
+	maxReconnectBackoff = 30 * time.Second
+	// maxDeliveryBlock is how long event delivery may block on a full
+	// eventsCh before HealthCheck reports the replicator as not ready.
+	maxDeliveryBlock = time.Minute
+)
 
-	var err error
-	// Connect via pgconn for replication
+// Start streams changes until ctx is cancelled. When the stream fails for any
+// reason (connection loss, server error, a message it cannot parse), it
+// reconnects with backoff and resumes from the slot's confirmed position, so
+// nothing is skipped. It returns nil after ctx is cancelled.
+func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ackCh <-chan uint64) error {
+	backoff := minReconnectBackoff
+	for {
+		streamed, err := r.stream(ctx, ch, ackCh)
+		r.streaming.Store(false)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if streamed {
+			backoff = minReconnectBackoff
+		}
+		log.Error().Err(err).Dur("retryIn", backoff).Msg("Replication stream stopped, reconnecting from the slot position")
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, maxReconnectBackoff)
+	}
+}
+
+// stream runs one replication session. streamed reports whether
+// START_REPLICATION succeeded, so Start can reset its backoff.
+func (r *pgReplicator) stream(ctx context.Context, ch chan<- *model.CDCEvent, ackCh <-chan uint64) (streamed bool, err error) {
+	log.Info().Str("slot", r.cfg.Slot).Str("publication", r.cfg.Publication).Msg("Starting PostgreSQL replication")
+
 	r.repConn, err = pgconn.Connect(ctx, r.cfg.PGConn+"?replication=database")
 	if err != nil {
-		return fmt.Errorf("failed to connect to database for replication: %w", err)
+		return false, fmt.Errorf("connect for replication: %w", err)
 	}
-	defer r.repConn.Close(ctx)
+	defer r.repConn.Close(context.Background())
 
-	// Create a separate connection for regular queries
-	r.queryConn, err = pgx.Connect(ctx, r.cfg.PGConn)
+	startLSN, err := r.prepare(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to connect to database for queries: %w", err)
+		return false, err
 	}
-	defer r.queryConn.Close(ctx)
+	// A new session resends relation messages before it uses them.
+	r.relations = make(map[uint32]relationInfo)
+	r.lastAckedLSN = max(r.lastAckedLSN, startLSN)
 
-	// Ensure publication exists
-	if err := r.ensurePublication(ctx); err != nil {
-		return fmt.Errorf("failed to ensure publication: %w", err)
-	}
-
-	// Ensure replication slot exists
-	if err := r.ensureReplicationSlot(ctx); err != nil {
-		return fmt.Errorf("failed to ensure replication slot: %w", err)
-	}
-
-	// Get the starting LSN position
-	r.lastAckedLSN, err = r.getStartLSN(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get starting LSN: %w", err)
-	}
-
-	// Set up plugin arguments
 	pluginArgs := []string{
 		"proto_version '1'",
 		fmt.Sprintf("publication_names '%s'", r.cfg.Publication),
 	}
-
-	// Start replication
-	if err := pglogrepl.StartReplication(ctx, r.repConn, r.cfg.Slot, r.lastAckedLSN, pglogrepl.StartReplicationOptions{PluginArgs: pluginArgs}); err != nil {
-		return fmt.Errorf("failed to start replication: %w", err)
+	if err := pglogrepl.StartReplication(ctx, r.repConn, r.cfg.Slot, startLSN, pglogrepl.StartReplicationOptions{PluginArgs: pluginArgs}); err != nil {
+		return false, fmt.Errorf("start replication: %w", err)
 	}
+	r.streaming.Store(true)
+	log.Info().Str("lsn", startLSN.String()).Msg("Streaming from the slot's confirmed position")
 
-	// Set up a ticker for sending standby status updates
 	const receiveTimeout = 5 * time.Second
 	standbyMessageTicker := time.NewTicker(receiveTimeout)
 	defer standbyMessageTicker.Stop()
@@ -193,97 +196,128 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 	for {
 		select {
 		case <-ctx.Done():
-			// Send a final status update before shutting down
-			return nil
+			return true, nil
 		case lsn := <-ackCh:
-			// Update the last acknowledged LSN
-			newLSN := pglogrepl.LSN(lsn)
-			// if newLSN > r.lastAckedLSN {
-			r.lastAckedLSN = newLSN
-			log.Info().Uint64("lsn", lsn).Str("lsnS", newLSN.String()).Msg("Updated acknowledged LSN position")
-			// Send a status update immediately after receiving an acknowledgment
-			_ = r.SendStandbyStatusUpdate(ctx, false)
-			// }
+			if newLSN := pglogrepl.LSN(lsn); newLSN > r.lastAckedLSN {
+				r.lastAckedLSN = newLSN
+				if err := r.SendStandbyStatusUpdate(ctx, false); err != nil {
+					return true, err
+				}
+			}
+			continue
 		case <-standbyMessageTicker.C:
-			// Send periodic status updates
-			_ = r.SendStandbyStatusUpdate(ctx, true)
+			if err := r.SendStandbyStatusUpdate(ctx, true); err != nil {
+				return true, err
+			}
+			continue
 		default:
-			// Set up a timeout context for receiving messages
-			receiveCtx, cancel := context.WithTimeout(ctx, receiveTimeout)
-			msg, err := r.repConn.ReceiveMessage(receiveCtx)
-			cancel()
-			if err != nil {
-				if pgconn.Timeout(err) {
-					// This is just a timeout, continue
-					continue
-				} else if pgErr, ok := err.(*pgconn.PgError); ok {
-					log.Error().Err(pgErr).Str("code", pgErr.Code).Msg("received PG error")
-				} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-					log.Error().Err(err).Msg("failed to receive message")
-				}
+		}
+
+		receiveCtx, cancel := context.WithTimeout(ctx, receiveTimeout)
+		msg, err := r.repConn.ReceiveMessage(receiveCtx)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return true, nil
+			}
+			if pgconn.Timeout(err) {
 				continue
 			}
-			// Check for error message
-			if errMsg, ok := msg.(*pgproto3.ErrorResponse); ok {
-				log.Error().Str("severity", errMsg.Severity).Str("code", errMsg.Code).Str("message", errMsg.Message).Msg("received Postgres error")
-				continue
-			}
+			return true, fmt.Errorf("receive message: %w", err)
+		}
 
-			// Process the message based on its type
-			copyData, ok := msg.(*pgproto3.CopyData)
-			if !ok {
-				log.Warn().Msgf("received unexpected message type: %T", msg)
-				continue
+		switch msg := msg.(type) {
+		case *pgproto3.ErrorResponse:
+			return true, fmt.Errorf("server error %s: %s", msg.Code, msg.Message)
+		case *pgproto3.CopyData:
+			if err := r.handleCopyData(ctx, msg.Data, ch); err != nil {
+				return true, err
 			}
-
-			// Handle message based on the first byte
-			switch copyData.Data[0] {
-			case pglogrepl.PrimaryKeepaliveMessageByteID:
-				// Primary keepalive message
-				pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(copyData.Data[1:])
-				if err != nil {
-					log.Error().Err(err).Msg("failed to parse primary keepalive message")
-					continue
-				}
-				// log.Debug().Str("server_wal_end", pkm.ServerWALEnd.String()).Msg("primary keepalive message")
-				// If the server requests a reply, send one immediately
-				if pkm.ReplyRequested {
-					_ = r.SendStandbyStatusUpdate(ctx, true)
-				}
-			case pglogrepl.XLogDataByteID:
-				// Handle XLogData message (actual data)
-				xld, err := pglogrepl.ParseXLogData(copyData.Data[1:])
-				if err != nil {
-					log.Error().Err(err).Msg("failed to parse XLogData")
-					continue
-				}
-
-				logicalMsg, err := pglogrepl.Parse(xld.WALData)
-				if err != nil {
-					log.Error().Err(err).Msg("failed to parse logical replication message")
-					continue
-				}
-				r.proccessLogicalMsg(logicalMsg, xld.WALStart, ch)
-			default:
-				// Any other message type
-				log.Warn().Msgf("received unexpected message byte ID: %d", copyData.Data[0])
-			}
+		default:
+			log.Warn().Msgf("received unexpected message type: %T", msg)
 		}
 	}
 }
 
-func (r *pgReplicator) HealthCheck(ctx context.Context) error {
-	if r.queryConn == nil {
-		return errors.New("query connection is not initialized")
+// prepare runs the setup queries on a short-lived connection and returns the
+// slot's confirmed position.
+func (r *pgReplicator) prepare(ctx context.Context) (pglogrepl.LSN, error) {
+	var err error
+	r.queryConn, err = pgx.Connect(ctx, r.cfg.PGConn)
+	if err != nil {
+		return 0, fmt.Errorf("connect for queries: %w", err)
 	}
-	if err := r.queryConn.Ping(ctx); err != nil {
-		return fmt.Errorf("failed to ping query connection: %w", err)
-	}
+	defer r.queryConn.Close(context.Background())
 
-	if r.repConn == nil {
-		return errors.New("replication connection is not initialized")
+	if err := r.ensurePublication(ctx); err != nil {
+		return 0, fmt.Errorf("ensure publication: %w", err)
 	}
+	if err := r.ensureReplicationSlot(ctx); err != nil {
+		return 0, fmt.Errorf("ensure replication slot: %w", err)
+	}
+	return r.getStartLSN(ctx)
+}
 
+// handleCopyData handles one CopyData frame. Any parse error stops the
+// session: skipping a message would let a later ACK confirm it.
+func (r *pgReplicator) handleCopyData(ctx context.Context, data []byte, ch chan<- *model.CDCEvent) error {
+	if len(data) == 0 {
+		return errors.New("empty CopyData message")
+	}
+	switch data[0] {
+	case pglogrepl.PrimaryKeepaliveMessageByteID:
+		pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(data[1:])
+		if err != nil {
+			return fmt.Errorf("parse primary keepalive: %w", err)
+		}
+		if pkm.ReplyRequested {
+			return r.SendStandbyStatusUpdate(ctx, false)
+		}
+	case pglogrepl.XLogDataByteID:
+		xld, err := pglogrepl.ParseXLogData(data[1:])
+		if err != nil {
+			return fmt.Errorf("parse XLogData: %w", err)
+		}
+		logicalMsg, err := pglogrepl.Parse(xld.WALData)
+		if err != nil {
+			return fmt.Errorf("parse logical replication message at %s: %w", xld.WALStart, err)
+		}
+		return r.proccessLogicalMsg(ctx, logicalMsg, xld.WALStart, ch)
+	default:
+		log.Warn().Msgf("received unexpected message byte ID: %d", data[0])
+	}
+	return nil
+}
+
+// deliver sends ev to ch. It records when delivery starts to block, so
+// HealthCheck can report a replicator stuck behind a full pipeline.
+func (r *pgReplicator) deliver(ctx context.Context, ch chan<- *model.CDCEvent, ev *model.CDCEvent) error {
+	select {
+	case ch <- ev:
+		return nil
+	default:
+	}
+	r.blockedSince.Store(time.Now().UnixNano())
+	defer r.blockedSince.Store(0)
+	select {
+	case ch <- ev:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// HealthCheck reports ready only while a replication session is streaming and
+// event delivery is not stuck.
+func (r *pgReplicator) HealthCheck(_ context.Context) error {
+	if !r.streaming.Load() {
+		return errors.New("replication stream is not running")
+	}
+	if since := r.blockedSince.Load(); since != 0 {
+		if blocked := time.Since(time.Unix(0, since)); blocked > maxDeliveryBlock {
+			return fmt.Errorf("event delivery blocked for %s", blocked.Round(time.Second))
+		}
+	}
 	return nil
 }
 
@@ -298,7 +332,7 @@ func (r *pgReplicator) HealthCheck(ctx context.Context) error {
 //     Do not add len(WALData): that lands past the end of the record, and if
 //     the next transaction's commit record starts there, Postgres would skip
 //     that transaction on restart.
-func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, walStart pglogrepl.LSN, ch chan<- *model.CDCEvent) {
+func (r *pgReplicator) proccessLogicalMsg(ctx context.Context, logicalMsg pglogrepl.Message, walStart pglogrepl.LSN, ch chan<- *model.CDCEvent) error {
 	// Handle different message types
 	switch msg := logicalMsg.(type) {
 	case *pglogrepl.RelationMessage:
@@ -329,7 +363,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, walStart
 		}
 
 		log.Debug().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("after_fields", len(data)).Str("lsn", walStart.String()).Msg("insert event")
-		ch <- ev
+		return r.deliver(ctx, ch, ev)
 
 	case *pglogrepl.UpdateMessage:
 		// Create CDC event for update
@@ -360,7 +394,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, walStart
 		}
 
 		log.Debug().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("before_fields", len(oldData)).Int("after_fields", len(newData)).Msg("update event")
-		ch <- ev
+		return r.deliver(ctx, ch, ev)
 
 	case *pglogrepl.DeleteMessage:
 		// Create CDC event for delete
@@ -387,7 +421,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, walStart
 		}
 
 		log.Debug().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("before_fields", len(data)).Msg("delete event")
-		ch <- ev
+		return r.deliver(ctx, ch, ev)
 
 	case *pglogrepl.BeginMessage:
 		log.Debug().Uint32("xid", msg.Xid).Msg("begin transaction")
@@ -401,7 +435,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, walStart
 		}
 
 		log.Debug().Str("lsn", msg.TransactionEndLSN.String()).Msg("commit transaction")
-		ch <- ev
+		return r.deliver(ctx, ch, ev)
 
 	case *pglogrepl.TruncateMessage:
 		log.Debug().Msg("truncate message")
@@ -409,4 +443,5 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, walStart
 	default:
 		log.Debug().Str("type", fmt.Sprintf("%T", msg)).Msg("other message type")
 	}
+	return nil
 }

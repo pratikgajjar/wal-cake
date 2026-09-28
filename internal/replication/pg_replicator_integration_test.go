@@ -167,3 +167,47 @@ func TestACKAfterCommitDoesNotSkipNextTransaction(t *testing.T) {
 		}
 	}
 }
+
+// TestReconnectsAfterConnectionLoss terminates the walsender and expects the
+// replicator to reconnect from the slot and deliver rows written after the loss.
+func TestReconnectsAfterConnectionLoss(t *testing.T) {
+	dsn := testDSN(t)
+	c, cfg := setup(t, dsn, "walcake_reconnect")
+	r := start(t, cfg)
+	waitFor(t, "slot active", 10*time.Second, func() bool { return slotField(t, c, cfg.Slot, "active") == "true" })
+	waitFor(t, "ready", 10*time.Second, func() bool { return r.repl.HealthCheck(context.Background()) == nil })
+
+	mustExec(t, c, "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = 'walcake_reconnect_slot'")
+	waitFor(t, "not ready after the connection is lost", 10*time.Second, func() bool { return r.repl.HealthCheck(context.Background()) != nil })
+
+	mustExec(t, c, "INSERT INTO walcake_reconnect VALUES ('after-loss')")
+	for {
+		ev := next(t, r.events, 20*time.Second)
+		if ev == nil {
+			t.Fatal("no event after the connection was lost: the replicator did not reconnect")
+		}
+		if ev.Operation == model.InsertOp && ev.After["v"] == "after-loss" {
+			break
+		}
+	}
+	if err := r.repl.HealthCheck(context.Background()); err != nil {
+		t.Fatalf("not ready after reconnect: %v", err)
+	}
+}
+
+// TestStartLSNFailsClosed checks that a failed slot query is an error, not a
+// silent start from the current WAL position.
+func TestStartLSNFailsClosed(t *testing.T) {
+	dsn := testDSN(t)
+	ctx := context.Background()
+	_, cfg := setup(t, dsn, "walcake_startlsn")
+	r := NewPGReplicator(cfg).(*pgReplicator)
+	var err error
+	if r.queryConn, err = pgx.Connect(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+	r.queryConn.Close(ctx) // the slot query will fail
+	if lsn, err := r.getStartLSN(ctx); err == nil {
+		t.Fatalf("getStartLSN returned %s and no error", lsn)
+	}
+}
