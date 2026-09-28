@@ -3,7 +3,6 @@ module git.famapp.in/fampay-inc/wal-cake
 go 1.24.1
 
 require (
-	github.com/alphadose/haxmap v1.4.1
 	github.com/apache/arrow-go/v18 v18.2.0
 	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/aws/aws-sdk-go-v2/config v1.29.14
@@ -13,6 +12,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/klauspost/compress v1.18.0
 	github.com/rs/zerolog v1.34.0
+	pgregory.net/rapid v1.3.0
 )
 
 require (

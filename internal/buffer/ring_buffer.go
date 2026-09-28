@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alphadose/haxmap"
 	"github.com/rs/zerolog/log"
 
 	"git.famapp.in/fampay-inc/wal-cake/internal/ack"
@@ -43,8 +42,8 @@ type RingBuffer struct {
 	processor    BatchProcessor
 	ackSeg       chan Segment
 	acked        *ack.Position
-	space        chan struct{}                // signalled when readIdx moves, so a blocked writer retries at once
-	tracker      *haxmap.Map[int64, *Segment] // Tracks completed segments
+	space        chan struct{}   // signalled when readIdx moves, so a blocked writer retries at once
+	tracker      *segmentTracker // StartIdx -> segment, for every segment not yet crossed by readIdx
 }
 
 // NewRingBuffer creates a ring buffer. Durable progress is published to acked.
@@ -65,7 +64,7 @@ func NewRingBuffer(batchSize, concurrency int, tickInterval time.Duration, proce
 		ackSeg:       make(chan Segment, concurrency),
 		acked:        acked,
 		space:        make(chan struct{}, 1),
-		tracker:      haxmap.New[int64, *Segment](),
+		tracker:      newSegmentTracker(),
 	}
 	return rb
 }
@@ -181,7 +180,7 @@ func (rb *RingBuffer) createTickerSegment() {
 	log.Debug().
 		Int64("startIdx", segment.StartIdx).
 		Int64("endIdx", segment.EndIdx).
-		Int("pendingSegMap", int(rb.tracker.Len())).
+		Int("pendingSegMap", rb.tracker.Len()).
 		Msg("Created ticker-based segment")
 }
 
