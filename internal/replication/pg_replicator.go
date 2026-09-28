@@ -258,15 +258,12 @@ func (r *pgReplicator) Start(ctx context.Context, ch chan<- *model.CDCEvent, ack
 					continue
 				}
 
-				// Calculate the new WAL position
-				xLogPos := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-				// log.Debug().Str("xLogPos", xLogPos.String()).Msg("updated wal")
 				logicalMsg, err := pglogrepl.Parse(xld.WALData)
 				if err != nil {
 					log.Error().Err(err).Msg("failed to parse logical replication message")
 					continue
 				}
-				r.proccessLogicalMsg(logicalMsg, xLogPos, ch)
+				r.proccessLogicalMsg(logicalMsg, xld.WALStart, ch)
 			default:
 				// Any other message type
 				log.Warn().Msgf("received unexpected message byte ID: %d", copyData.Data[0])
@@ -290,7 +287,18 @@ func (r *pgReplicator) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos pglogrepl.LSN, ch chan<- *model.CDCEvent) {
+// proccessLogicalMsg turns one pgoutput message into a CDC event.
+//
+// walStart is the XLogData WALStart. For a row change it is the LSN of the
+// change record. Every event LSN must be safe to confirm to the slot once the
+// event and everything before it is durable:
+//   - A row event uses its change LSN. Confirming it makes Postgres resend the
+//     whole transaction on restart, which is at-least-once.
+//   - A commit event uses the end of the commit record (TransactionEndLSN).
+//     Do not add len(WALData): that lands past the end of the record, and if
+//     the next transaction's commit record starts there, Postgres would skip
+//     that transaction on restart.
+func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, walStart pglogrepl.LSN, ch chan<- *model.CDCEvent) {
 	// Handle different message types
 	switch msg := logicalMsg.(type) {
 	case *pglogrepl.RelationMessage:
@@ -316,11 +324,11 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Table:     relInfo.name,
 			Operation: model.InsertOp,
 			Timestamp: time.Now(),
-			LSN:       uint64(xLogPos),
+			LSN:       uint64(walStart),
 			After:     data,
 		}
 
-		log.Debug().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("after_fields", len(data)).Str("lsn", xLogPos.String()).Msg("insert event")
+		log.Debug().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("after_fields", len(data)).Str("lsn", walStart.String()).Msg("insert event")
 		ch <- ev
 
 	case *pglogrepl.UpdateMessage:
@@ -346,7 +354,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Table:     relInfo.name,
 			Operation: model.UpdateOp,
 			Timestamp: time.Now(),
-			LSN:       uint64(xLogPos),
+			LSN:       uint64(walStart),
 			Before:    oldData,
 			After:     newData,
 		}
@@ -374,7 +382,7 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Table:     relInfo.name,
 			Operation: model.DeleteOp,
 			Timestamp: time.Now(),
-			LSN:       uint64(xLogPos),
+			LSN:       uint64(walStart),
 			Before:    data,
 		}
 
@@ -389,10 +397,10 @@ func (r *pgReplicator) proccessLogicalMsg(logicalMsg pglogrepl.Message, xLogPos 
 			Table:     "_transaction", // Special table name for transaction events
 			Operation: model.CommitOp,
 			Timestamp: time.Now(),
-			LSN:       uint64(xLogPos),
+			LSN:       uint64(msg.TransactionEndLSN),
 		}
 
-		log.Debug().Str("lsn", xLogPos.String()).Msg("commit transaction")
+		log.Debug().Str("lsn", msg.TransactionEndLSN.String()).Msg("commit transaction")
 		ch <- ev
 
 	case *pglogrepl.TruncateMessage:
