@@ -51,6 +51,7 @@ func (w *writerTell) Tell() int64 {
 
 // NewParquetWriter creates a new Parquet writer with ZSTD compression
 func NewParquetWriter() ParquetWriter {
+	registerPooledZstd()
 	// Create writer properties with ZSTD compression
 	sorted := []parquet.SortingColumn{
 		{ColumnIdx: 2, Descending: false, NullsFirst: false}, // timestamp
