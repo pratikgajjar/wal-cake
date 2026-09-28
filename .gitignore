@@ -1,2 +1,4 @@
 wal-cake
 dist
+# rapid writes failing cases here when a property test fails
+testdata/rapid/
