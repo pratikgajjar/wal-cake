@@ -232,6 +232,9 @@ func TestShutdownConfirmsFinalPosition(t *testing.T) {
 		if ev == nil {
 			t.Fatal("no commit event")
 		}
+		if ev.CommitTime.IsZero() {
+			t.Fatalf("%s event has no commit time", ev.Operation)
+		}
 		if ev.Operation == model.CommitOp {
 			commit = ev
 		}

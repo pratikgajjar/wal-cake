@@ -45,6 +45,7 @@ type pgReplicator struct {
 	lastAckedLSN pglogrepl.LSN
 	relations    map[uint32]relationInfo
 	decoder      *TupleDecoder
+	commitTime   time.Time // commit timestamp of the transaction being decoded
 	// streaming and blockedSince are read by HealthCheck from other goroutines.
 	streaming    atomic.Bool
 	blockedSince atomic.Int64 // unix nanoseconds, 0 when delivery is not blocked
@@ -375,11 +376,12 @@ func (r *pgReplicator) proccessLogicalMsg(ctx context.Context, logicalMsg pglogr
 		data := r.decoder.ExtractTupleData(msg.Tuple, relInfo.columns)
 
 		ev := &model.CDCEvent{
-			Table:     relInfo.name,
-			Operation: model.InsertOp,
-			Timestamp: time.Now(),
-			LSN:       uint64(walStart),
-			After:     data,
+			Table:      relInfo.name,
+			Operation:  model.InsertOp,
+			Timestamp:  time.Now(),
+			CommitTime: r.commitTime,
+			LSN:        uint64(walStart),
+			After:      data,
 		}
 
 		log.Debug().Str("table", relInfo.name).Str("op", string(model.InsertOp)).Int("after_fields", len(data)).Str("lsn", walStart.String()).Msg("insert event")
@@ -405,12 +407,13 @@ func (r *pgReplicator) proccessLogicalMsg(ctx context.Context, logicalMsg pglogr
 		}
 
 		ev := &model.CDCEvent{
-			Table:     relInfo.name,
-			Operation: model.UpdateOp,
-			Timestamp: time.Now(),
-			LSN:       uint64(walStart),
-			Before:    oldData,
-			After:     newData,
+			Table:      relInfo.name,
+			Operation:  model.UpdateOp,
+			Timestamp:  time.Now(),
+			CommitTime: r.commitTime,
+			LSN:        uint64(walStart),
+			Before:     oldData,
+			After:      newData,
 		}
 
 		log.Debug().Str("table", relInfo.name).Str("op", string(model.UpdateOp)).Int("before_fields", len(oldData)).Int("after_fields", len(newData)).Msg("update event")
@@ -433,25 +436,28 @@ func (r *pgReplicator) proccessLogicalMsg(ctx context.Context, logicalMsg pglogr
 		}
 
 		ev := &model.CDCEvent{
-			Table:     relInfo.name,
-			Operation: model.DeleteOp,
-			Timestamp: time.Now(),
-			LSN:       uint64(walStart),
-			Before:    data,
+			Table:      relInfo.name,
+			Operation:  model.DeleteOp,
+			Timestamp:  time.Now(),
+			CommitTime: r.commitTime,
+			LSN:        uint64(walStart),
+			Before:     data,
 		}
 
 		log.Debug().Str("table", relInfo.name).Str("op", string(model.DeleteOp)).Int("before_fields", len(data)).Msg("delete event")
 		return r.deliver(ctx, ch, ev)
 
 	case *pglogrepl.BeginMessage:
+		r.commitTime = msg.CommitTime
 		log.Debug().Uint32("xid", msg.Xid).Msg("begin transaction")
 
 	case *pglogrepl.CommitMessage:
 		ev := &model.CDCEvent{
-			Table:     "_transaction", // Special table name for transaction events
-			Operation: model.CommitOp,
-			Timestamp: time.Now(),
-			LSN:       uint64(msg.TransactionEndLSN),
+			Table:      "_transaction", // Special table name for transaction events
+			Operation:  model.CommitOp,
+			Timestamp:  time.Now(),
+			CommitTime: msg.CommitTime,
+			LSN:        uint64(msg.TransactionEndLSN),
 		}
 
 		log.Debug().Str("lsn", msg.TransactionEndLSN.String()).Msg("commit transaction")

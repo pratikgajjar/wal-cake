@@ -51,18 +51,15 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 		Str("end", model.LSNStr(events[len(events)-1].LSN)).
 		Msg("Processing batch")
 
-	// Events are from the same day
-	if events[0].Date().Equal(events[len(events)-1].Date()) {
-		return p.Upload(ctx, events)
-	}
-
-	// Upload one file per date. Events are in WAL order, so each date is a contiguous run.
+	// Upload one file per commit date. Commit timestamps are almost, but not
+	// strictly, in commit order, so check every event rather than only the
+	// first and last.
 	curDate := events[0].Date()
 	left := 0
 	for i, e := range events {
 		nextDate := e.Date()
 		if !nextDate.Equal(curDate) {
-			if err := p.Upload(ctx, events[left:i]); err != nil {
+			if err := p.Upload(ctx, curDate, events[left:i]); err != nil {
 				return err
 			}
 			curDate = nextDate
@@ -70,10 +67,11 @@ func (p *ParquetBatchProcessor) Process(ctx context.Context, events []*model.CDC
 		}
 	}
 
-	return p.Upload(ctx, events[left:])
+	return p.Upload(ctx, curDate, events[left:])
 }
 
-func (p *ParquetBatchProcessor) Upload(ctx context.Context, events []*model.CDCEvent) error {
+// Upload writes events, which all belong to date, to one Parquet file.
+func (p *ParquetBatchProcessor) Upload(ctx context.Context, date time.Time, events []*model.CDCEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -92,7 +90,7 @@ func (p *ParquetBatchProcessor) Upload(ctx context.Context, events []*model.CDCE
 			Msg("No data to upload")
 		return nil
 	}
-	s3Key := p.generateS3Key(events[len(events)-1].Timestamp)
+	s3Key := p.generateS3Key(date, events[len(events)-1].Timestamp)
 	if err := p.uploader.UploadBytes(ctx, s3Key, parquetBytes); err != nil {
 		log.Error().
 			Err(err).
@@ -104,12 +102,14 @@ func (p *ParquetBatchProcessor) Upload(ctx context.Context, events []*model.CDCE
 	return nil
 }
 
-// generateS3Key generates an S3 key for the Parquet file
-func (p *ParquetBatchProcessor) generateS3Key(timestamp time.Time) string {
+// generateS3Key returns namespace/YYYY/MM/DD/<decode-time-µs>.<codec>.parquet.
+// The folder is the UTC commit date; the file name is the last event's
+// decode time, which is unique per segment.
+func (p *ParquetBatchProcessor) generateS3Key(date, lastDecoded time.Time) string {
 	key := fmt.Sprintf("%s/%s/%d.%s.parquet",
 		p.config.Namespace,
-		timestamp.Format("2006/01/02"),
-		timestamp.UnixMicro(),
+		date.UTC().Format("2006/01/02"),
+		lastDecoded.UnixMicro(),
 		p.transformer.GetCompressionCodec(),
 	)
 	return key

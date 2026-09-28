@@ -2,6 +2,7 @@ package buffer
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func TestProcessSplitsByDate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			events := make([]*model.CDCEvent, len(tt.days))
 			for i, ts := range tt.days {
-				events[i] = &model.CDCEvent{Table: "t", Operation: model.InsertOp, Timestamp: ts, LSN: uint64(i + 1)}
+				events[i] = &model.CDCEvent{Table: "t", Operation: model.InsertOp, Timestamp: ts, CommitTime: ts, LSN: uint64(i + 1)}
 			}
 			w, u := &recordingWriter{}, &recordingUploader{}
 			p := NewParquetBatchProcessor(w, u, &BatchProcessorConfig{Namespace: "ns"})
@@ -73,5 +74,26 @@ func TestProcessSplitsByDate(t *testing.T) {
 				t.Errorf("uploaded %d events, want %d", total, len(events))
 			}
 		})
+	}
+}
+
+// The folder is the UTC commit date, even if the change is decoded after
+// midnight or the process runs in another time zone.
+func TestProcessUsesUTCCommitDate(t *testing.T) {
+	ist := time.FixedZone("IST", 5*3600+1800)
+	commit := time.Date(2026, 5, 9, 23, 59, 59, 0, time.UTC).In(ist) // 10 May 05:29 IST
+	decoded := commit.Add(5 * time.Second)                           // 10 May 00:00:04 UTC
+	events := []*model.CDCEvent{
+		{Table: "t", Operation: model.InsertOp, Timestamp: decoded, CommitTime: commit, LSN: 1},
+		{Table: "t", Operation: model.CommitOp, Timestamp: decoded, CommitTime: commit, LSN: 2},
+	}
+	w, u := &recordingWriter{}, &recordingUploader{}
+	p := NewParquetBatchProcessor(w, u, &BatchProcessorConfig{Namespace: "ns"})
+	if err := p.Process(context.Background(), events); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("ns/2026/05/09/%d.ZSTD.parquet", decoded.UnixMicro())
+	if len(u.keys) != 1 || u.keys[0] != want {
+		t.Fatalf("keys = %v, want [%s]", u.keys, want)
 	}
 }

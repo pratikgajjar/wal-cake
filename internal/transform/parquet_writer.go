@@ -63,6 +63,7 @@ func NewParquetWriter() ParquetWriter {
 		parquet.WithDictionaryFor("operation", true),
 		parquet.WithEncodingFor("timestamp", parquet.Encodings.DeltaBinaryPacked),
 		parquet.WithEncodingFor("lsn", parquet.Encodings.DeltaBinaryPacked),
+		parquet.WithEncodingFor("commit_time", parquet.Encodings.DeltaBinaryPacked),
 		parquet.WithEncodingFor("before", parquet.Encodings.Plain),
 		parquet.WithEncodingFor("after", parquet.Encodings.Plain),
 		parquet.WithStats(true),
@@ -164,8 +165,20 @@ func (w *parquetWriter) createSchema() *schema.Schema {
 		log.Fatal().Err(err).Msg("create after schema node")
 	}
 
-	// Create schema
-	fields := []schema.Node{tableNode, opNode, tsNode, lsnNode, beforeNode, afterNode}
+	commitTimeNode, err := schema.NewPrimitiveNodeLogical(
+		"commit_time",
+		parquet.Repetitions.Required,
+		schema.NewTimestampLogicalType(true, schema.TimeUnitMicros),
+		parquet.Types.Int64,
+		-1,
+		-1,
+	)
+	if err != nil {
+		log.Fatal().Err(err).Msg("create commit_time schema node")
+	}
+
+	// Create schema. New columns go at the end so existing column indexes stay stable.
+	fields := []schema.Node{tableNode, opNode, tsNode, lsnNode, beforeNode, afterNode, commitTimeNode}
 	root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, fields, -1)
 	if err != nil {
 		log.Fatal().Err(err).Msg("create schema")
@@ -208,6 +221,7 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 	opData := make([]parquet.ByteArray, validCount)
 	tsData := make([]int64, validCount)
 	lsnData := make([]int64, validCount)
+	commitTimeData := make([]int64, validCount)
 	// before and after are optional. Their value slices hold only the
 	// non-null values; the definition level marks each row as null (0) or
 	// present (1). An insert has no before image and a delete has no after.
@@ -231,6 +245,7 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 		tsData[index] = ev.Timestamp.UnixMicro()
 		// LSN column
 		lsnData[index] = int64(ev.LSN)
+		commitTimeData[index] = ev.CommitTime.UnixMicro()
 
 		if ev.Before != nil {
 			beforeJson, err := json.Marshal(ev.Before)
@@ -318,6 +333,14 @@ func (w *parquetWriter) writeEventsToParquet(events []*model.CDCEvent, writer io
 	_, err = afterByteArrayWriter.WriteBatch(afterJsonArr, defAfter, nil)
 	if err != nil {
 		return fmt.Errorf("write after column: %w", err)
+	}
+
+	commitTimeWriter, err := rg.NextColumn()
+	if err != nil {
+		return fmt.Errorf("next column: %w", err)
+	}
+	if _, err := commitTimeWriter.(*file.Int64ColumnChunkWriter).WriteBatch(commitTimeData, nil, nil); err != nil {
+		return fmt.Errorf("write commit_time column: %w", err)
 	}
 
 	// Close the row group
